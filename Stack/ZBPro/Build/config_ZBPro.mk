@@ -1,6 +1,6 @@
 ###############################################################################
 #
-# MODULE:   config_ZBPro.mk
+# MODULE:   Config_ZBPro.mk for 516x and 7x chip families
 #
 # DESCRIPTION: ZBPro stack configuration. Defines tool, library and
 #              header file details for building an app using the ZBPro stack
@@ -25,7 +25,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 #
-# Copyright 2015-2019, 2022-2024 NXP
+# Copyright 2015-2019, 2022 NXP
 #
 ###############################################################################
 
@@ -36,247 +36,188 @@ WWAH ?= 0
 LEGACY ?= 0
 R23_UPDATES ?= 0
 ifeq ($(R23_UPDATES),1)
-ifeq ($(LEGACY),0)
-    R22PLUS = _R23
-else
+ifeq ($(LEGACY),1)
     $(info ***** Conflicting R23 settings, probably building the GU *****)
 endif
 endif
 OTA ?= 0
 OTA_INTERNAL_STORAGE ?= 0
 
-ifeq ($(ZIGBEE_PLAT),K32W1)
-    SDK_DEVICE_FAMILY   ?= K32W1
-    SDK_DEVICE_NAME     ?= K32W1480
-    SDK_BOARD           ?= k32w148evk
+PDUMCONFIG = $(TOOL_BASE_DIR)/PDUMConfig/Source/PDUMConfig
+ZPSCONFIG  = $(TOOL_BASE_DIR)/ZPSConfig/Source/ZPSConfig
+
+
+STACK_SIZE ?= 5000
+MINIMUM_HEAP_SIZE ?= 2000
+###############################################################################
+# ROM based software components
+
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/Mac/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/MicroSpecific/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/MiniMAC/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/MMAC/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/TimerServer/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/Random/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/ZigbeeCommon/Include
+
+ifeq ($(JENNIC_MAC), MAC)
+    $(info JENNIC_MAC is MAC )
+    APPLIBS +=ZPSMAC
+    CFLAGS  += -DREDUCED_ZIGBEE_MAC_BUILD
+    REDUCED_MAC_LIB_SUFFIX = ZIGBEE_
 else
-ifeq ($(ZIGBEE_PLAT),K32W0)
-    SDK_DEVICE_FAMILY   ?= K32W0
-    SDK_DEVICE_NAME     ?= K32W061
-    SDK_BOARD           ?= k32w061dk6
-else
-ifeq ($(ZIGBEE_PLAT),NCP_HOST)
-    SDK_DEVICE_FAMILY   ?= K32W1
-    SDK_DEVICE_NAME     ?= K32W1480
-    SDK_BOARD           ?= k32w148evk
-else
-    $(error ZIGBEE_PLAT must be set to either K32W0, K32W1 or NCP_HOST)
-endif
-endif
-endif
-
-PDM_NONE            ?= 0
-SELOVERIDE          ?= 0
-FRAMEWORK_SWITCH    ?= 0
-
-# Currently the stack should be compiled with JENNIC_CHIP_FAMILY == JN518x
-# in order to enable code guarded by JN518x on all platforms.
-JENNIC_CHIP_FAMILY  ?= JN518x
-JENNIC_CHIP         ?= JN5189
-SELOTA              ?= NONE
-HEAP_SIZE           ?= 2000
-STACK_SIZE          ?= 2000
-SDK_BASE_DIR        ?=  ../../../../../..
-# SDK2_BASE_DIR is used in K32W0 builds
-SDK2_BASE_DIR        ?= $(SDK_BASE_DIR)
-
-ZIGBEE_BASE_DIR      ?= $(SDK_BASE_DIR)/middleware/wireless/zigbee
-ZIGBEE_COMMON_SRC    ?= $(ZIGBEE_BASE_DIR)/ZigbeeCommon/Source
-TOOL_BASE_DIR        ?= $(ZIGBEE_BASE_DIR)/tools
-PDUMCONFIG            = $(TOOL_BASE_DIR)/PDUMConfig/Source/PDUMConfig
-ZPSCONFIG             = $(TOOL_BASE_DIR)/ZPSConfig/Source/ZPSConfig
-# Used by ZCL
-STACK_BASE_DIR       ?= $(ZIGBEE_BASE_DIR)/BuildConfig
-
-FRAMEWORK_BASE_DIR   ?= $(SDK_BASE_DIR)/middleware/wireless/framework
-
-CHIP_STARTUP_SRC     ?= $(SDK_BASE_DIR)/devices/$(SDK_DEVICE_NAME)/gcc
-CHIP_SYSTEM_SRC      ?= $(SDK_BASE_DIR)/devices/$(SDK_DEVICE_NAME)
-BOARD_LEVEL_SRC      ?= $(SDK_BASE_DIR)/boards/$(SDK_BOARD)
-FSL_COMPONENTS       ?= $(SDK_BASE_DIR)/components
-
-# OSA Config
-ifneq ($(ZIGBEE_PLAT),NCP_HOST)
-include $(SDK_BASE_DIR)/middleware/wireless/zigbee/BuildConfig/ZBPro/Build/config_OSA.mk
-endif 
-
-# Platform specific configs
-include $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/build/device.mk
-include $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/build/platform.mk
+    $(info JENNIC_MAC is Mini MAC shim )
+    JENNIC_MAC = MiniMacShim
+    JENNIC_MAC_PLATFORM ?= SOC
 
 ###############################################################################
-# Common part (all platforms)
+# Determine correct MAC library for platform
 
-# Zigbee Common Sources
-APPSRC += ZQueue.c
-APPSRC += ZTimer.c
-APPSRC += app_zps_link_keys.c
-APPSRC += appZdpExtraction.c
-APPSRC += appZpsBeaconHandler.c
-APPSRC += appZpsExtendedDebug.c
-ifeq ($(R23_UPDATES),1)
-    APPSRC += tlv.c
+    ifeq ($(JENNIC_MAC_PLATFORM),SOC)
+        $(info JENNIC_MAC_PLATFORM is SOC)
+        APPLIBS +=ZPSMAC_Mini_SOC
+    else
+        ifeq ($(JENNIC_MAC_PLATFORM),SERIAL)
+            $(info JENNIC_MAC_PLATFORM is SERIAL)
+            APPLIBS +=ZPSMAC_Mini_SERIAL
+            APPLIBS +=SerialMiniMacUpper
+        else
+            ifeq ($(JENNIC_MAC_PLATFORM),MULTI)
+                 $(info JENNIC_MAC_PLATFORM is MULTI)
+                 APPLIBS +=ZPSMAC_Mini_MULTI
+                 APPLIBS +=SerialMiniMacUpper
+            endif
+       endif
+    endif
 endif
 
-# Zigbee Common Includes
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/SerialMAC/Include
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/ZPSMAC/Include
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/ZPSNWK/Include
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/ZPSTSV/Include
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/ZigbeeCommon/Include
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/ZPSAPL/Include
-INCFLAGS += -I$(ZIGBEE_BASE_DIR)/platform
+
+ifeq ($(WWAH),1)
+    CFLAGS += -DWWAH_SUPPORT
+endif
+
+ifeq ($(R23_UPDATES),1)
+    CFLAGS += -DR23_UPDATES
+endif
+
+###############################################################################
+# RAM based software components
+
+
+CFLAGS += -DPDM_USER_SUPPLIED_ID
+CFLAGS += -DPDM_NO_RTOS
+ifeq ($(PDM_BUILD_TYPE),_EEPROM)
+    CFLAGS += -DPDM$(PDM_BUILD_TYPE)
+else
+    ifeq ($(PDM_BUILD_TYPE),_EXTERNAL_FLASH)
+        CFLAGS += -DPDM$(PDM_BUILD_TYPE)
+    else
+        ifeq ($(PDM_BUILD_TYPE),_NONE)
+            CFLAGS += -DPDM$(PDM_BUILD_TYPE)
+        else
+            $(error PDM_BUILD_TYPE must be defined please define PDM_BUILD_TYPE=_EEPROM or PDM_BUILD_TYPE=_EXTERNAL_FLASH)
+        endif
+    endif
+endif
+
+
+# NB Order is significant for GNU linker
+
+APPLIBS +=PWRM
+APPLIBS +=ZPSTSV
+APPLIBS +=AES_SW
+APPLIBS +=PDUM
+ifeq ($(LEGACY),0)
+    APPLIBS +=ZPSAPL
+else
+    APPLIBS +=ZPSAPL_LEGACY
+    CFLAGS +=  -DLEGACY_SUPPORT
+endif
+APPLIBS +=Random
+
+
+INCFLAGS += $(addsuffix /Include,$(addprefix -I$(COMPONENTS_BASE_DIR)/,$(APPLIBS)))
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/PDM/Include
+
+ifneq ($(PDM_BUILD_TYPE),_NONE)
+    APPLIBS +=PDM$(PDM_BUILD_TYPE)_NO_RTOS
+endif
 
 ifeq ($(TRACE), 1)
     CFLAGS  += -DDBG_ENABLE
-    CFLAGS  += -DDEBUG_ENABLE
     $(info Building trace version ...)
-endif
-
-CFLAGS += -DENABLE_RAM_VECTOR_TABLE
-CFLAGS += -DSDK_DEVICE_FAMILY=$(SDK_DEVICE_FAMILY)
-CFLAGS += -DPDM_USER_SUPPLIED_ID
-CFLAGS += -DPDM_NO_RTOS
-
-
-ifeq ($(FRAMEWORK_SWITCH),1)
-ifneq ($(ZIGBEE_PLAT),NCP_HOST)
-CFLAGS  += -DZIGBEE_USE_FRAMEWORK=1
-endif
-endif
-
-##################################################################################
-## LIBS
-
-ifneq ($(SELOTA),NONE)
-    APPLIBS += Selective_OTA
-endif
-
-ifneq ($(ZIGBEE_PLAT),NCP_HOST)
-ifneq ($(SELOTA),APP0)
-
-    APPLIBS += ZPSTSV
-
-    APPLIBS += PDUM
-
-    ifeq ($(WWAH),0)
-        ifeq ($(LEGACY),0)
-            APPLIBS += ZPSAPL$(R22PLUS)
-        else
-            APPLIBS += ZPSAPL_LEGACY
-            CFLAGS += -DLEGACY_SUPPORT
-        endif
-    else
-        APPLIBS += ZPSAPL_WWAH
-    endif
-
-    $(info MAC is Mini MAC shim )
-    MAC_PLATFORM ?= SOC
-    ###############################################################################
-    # Determine correct MAC library for platform
-
-    ifeq ($(MAC_PLATFORM),SOC)
-        $(info MAC_PLATFORM is SOC)
-        APPLIBS += ZPSMAC_Mini_SOC
-    else
-    ifeq ($(MAC_PLATFORM),SERIAL)
-        $(info MAC_PLATFORM is SERIAL)
-        APPLIBS += ZPSMAC_Mini_SERIAL
-        APPLIBS += SerialMiniMacUpper
-    else
-    ifeq ($(MAC_PLATFORM),MULTI)
-        $(info MAC_PLATFORM is MULTI)
-        APPLIBS += ZPSMAC_Mini_MULTI
-        APPLIBS += SerialMiniMacUpper
-    endif
-    endif
-    endif
-
-    ifeq ($(OPTIONAL_STACK_FEATURES),1)
-        ifneq ($(ZBPRO_DEVICE_TYPE), ZED)
-            APPLIBS += ZPSIPAN
-        else
-            APPLIBS += ZPSIPAN_ZED
-        endif
-    endif
-
-    ifeq ($(OPTIONAL_STACK_FEATURES),2)
-        ifneq ($(ZBPRO_DEVICE_TYPE), ZED)
-            APPLIBS += ZPSGP
-        else
-            APPLIBS += ZPSGP_ZED
-        endif
-    endif
-
-    ifeq ($(OPTIONAL_STACK_FEATURES),3)
-        ifneq ($(ZBPRO_DEVICE_TYPE), ZED)
-            APPLIBS += ZPSGP
-            APPLIBS += ZPSIPAN
-        else
-            APPLIBS += ZPSGP_ZED
-            APPLIBS += ZPSIPAN_ZED
-        endif
-    endif
-
-    ifeq ($(ZBPRO_DEVICE_TYPE), ZCR)
-        ifeq ($(WWAH),0)
-            APPLIBS += ZPSNWK$(R22PLUS)
-        else
-            APPLIBS += ZPSNWK_WWAH
-        endif
-    else
-        ifeq ($(ZBPRO_DEVICE_TYPE), ZED)
-            ifeq ($(WWAH),0)
-                APPLIBS += ZPSNWK_ZED$(R22PLUS)
-            else
-                APPLIBS += ZPSNWK_WWAH_ZED
-            endif
-        else
-            $(error ZBPRO_DEVICE_TYPE must be set to either ZCR or ZED)
-        endif
-    endif
-endif
-
-# Set ZPS_NWK_LIB and ZPS_APL_LIB path
-ifeq ($(ZBPRO_DEVICE_TYPE), ZCR)
-    ifeq ($(WWAH),0)
-        ZPS_NWK_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSNWK$(R22PLUS).a
-    else
-        ZPS_NWK_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSNWK_WWAH.a
-    endif
-endif
-
-ifeq ($(ZBPRO_DEVICE_TYPE), ZED)
-    ifeq ($(WWAH),0)
-        ZPS_NWK_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSNWK_ZED$(R22PLUS).a
-    else
-        ZPS_NWK_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSNWK_WWAH_ZED.a
-    endif
-endif
-
-ifeq ($(WWAH),0)
-    ifeq ($(LEGACY),0)
-        ZPS_APL_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSAPL$(R22PLUS).a
-    else
-        ZPS_APL_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSAPL_LEGACY.a
-    endif
+    APPLIBS +=DBG
 else
-    ZPS_APL_LIB = $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs/libZPSAPL_WWAH.a
+    INCFLAGS += -I$(COMPONENTS_BASE_DIR)/DBG/Include
 endif
 
-vector_table_size    ?= 512
-__ram_vector_table__ ?= 1
-
-LDFLAGS += -Wl,--defsym,vector_table_size=$(vector_table_size)
-LDFLAGS += -Wl,--defsym,__ram_vector_table__=$(__ram_vector_table__)
-
-LDFLAGS += -L $(ZIGBEE_BASE_DIR)/platform/$(ZIGBEE_PLAT)/libs
-LDFLAGS += --specs=nosys.specs
-
-else 
-# Platform is NCP_HOST,get the NCP ver. of the PDUM lib 
-APPLIBS += PDUM_NCP
-# Temporary location for pdum ncp lib
-LDFLAGS += -L $(ZIGBEE_BASE_DIR)/verfication/AT-BDB/Build/libPDUM_NCP
+ifeq ($(OPTIONAL_STACK_FEATURES),1)
+    ifneq ($(ZBPRO_DEVICE_TYPE), ZED)
+        APPLIBS += ZPSIPAN
+    else
+        APPLIBS += ZPSIPAN_ZED
+    endif
 endif
+
+ifeq ($(OPTIONAL_STACK_FEATURES),2)
+    ifneq ($(ZBPRO_DEVICE_TYPE), ZED)
+        APPLIBS += ZPSGP
+    else
+        APPLIBS += ZPSGP_ZED
+    endif
+endif
+
+ifeq ($(OPTIONAL_STACK_FEATURES),3)
+    ifneq ($(ZBPRO_DEVICE_TYPE), ZED)
+        APPLIBS += ZPSGP
+        APPLIBS += ZPSIPAN
+    else
+        APPLIBS += ZPSGP_ZED
+        APPLIBS += ZPSIPAN_ZED
+    endif
+endif
+
+
+###############################################################################
+# Paths to components provided as source
+
+APPSRC += ZQueue.c
+APPSRC += ZTimer.c
+APPSRC += app_zps_link_keys.c
+ifeq ($(R23_UPDATES),1)
+APPSRC += tlv.c
+endif
+
+###############################################################################
+# Paths to network and application layer libs for stack config tools
+
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/ZPSMAC/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/ZPSNWK/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/ZPSAPL/Include
+INCFLAGS += -I$(COMPONENTS_BASE_DIR)/ZigbeeCommon/Include
+ifeq ($(ZBPRO_DEVICE_TYPE), ZCR)
+    APPLIBS +=ZPSNWK
+else
+    ifeq ($(ZBPRO_DEVICE_TYPE), ZED)
+        APPLIBS +=ZPSNWK_ZED
+    else
+        $(error ZBPRO_DEVICE_TYPE must be set to either ZCR or ZED)
+    endif
+endif
+
+ifeq ($(ZBPRO_DEVICE_TYPE), ZCR)
+    ZPS_NWK_LIB = $(COMPONENTS_BASE_DIR)/Library/libZPSNWK_$(JENNIC_CHIP_FAMILY).a
+endif
+ifeq ($(ZBPRO_DEVICE_TYPE), ZED)
+    ZPS_NWK_LIB = $(COMPONENTS_BASE_DIR)/Library/libZPSNWK_ZED_$(JENNIC_CHIP_FAMILY).a
+endif
+
+ifeq ($(LEGACY),0)
+    ZPS_APL_LIB = $(COMPONENTS_BASE_DIR)/Library/libZPSAPL_$(JENNIC_CHIP_FAMILY).a
+else
+    ZPS_APL_LIB = $(COMPONENTS_BASE_DIR)/Library/libZPSAPL_LEGACY_$(JENNIC_CHIP_FAMILY).a
+endif
+
+LDFLAGS += -Wl,--gc-sections
+
 ###############################################################################

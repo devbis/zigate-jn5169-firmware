@@ -1,6 +1,6 @@
 ###############################################################################
 #
-# MODULE:   Config_ZCL.mk
+# MODULE:   Config_ZCL.mk for 516x and 7x chip families
 #
 # DESCRIPTION:unified Profile make requirements
 # 
@@ -33,15 +33,13 @@
 ###############################################################################
 
 ###############################################################################
-RAMOPT ?= 0
-OTA    ?= 0
-# Get ZigBee stack makefile requirements
-include $(SDK_BASE_DIR)/middleware/wireless/zigbee/BuildConfig/ZBPro/Build/config_ZBPro.mk
 
+# Get ZigBee stack makefile requirements
+include $(STACK_BASE_DIR)/ZBPro/Build/config_ZBPro.mk
 ###############################################################################
-ZCIF_BASE        = $(ZIGBEE_BASE_DIR)/ZCIF
+ZCIF_BASE        = $(COMPONENTS_BASE_DIR)/ZCIF
 ZCIF_SRC         = $(ZCIF_BASE)/Source
-ZCL_BASE         = $(ZIGBEE_BASE_DIR)/ZCL
+ZCL_BASE         = $(COMPONENTS_BASE_DIR)/ZCL
 CLUSTERS_BASE    = $(ZCL_BASE)/Clusters
 DEVICES_BASE     = $(ZCL_BASE)/Devices
 
@@ -104,176 +102,94 @@ ZCL_SRC_DIRS                            = $(ZCIF_SRC):$(CLUSTERS_SRC_DIRS):$(DEV
 
 ifeq ($(GP_SUPPORT), 1)
 GPSRC:=$(shell cd $(CLUSTERS_GREENPOWER_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(GPSRC)
-ZCLAPPSRC += gp.c
-else
 APPSRC += $(GPSRC)
 APPSRC += gp.c
-endif 
 endif
 
 
 # Clusters
 # All General cluster files
 GENSRCS:=$(shell cd $(CLUSTERS_GENERAL_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(GENSRCS)
-else
 APPSRC += $(GENSRCS)
-endif
 
 # All Generic devices
 GENERIC_SRCS:=$(shell cd $(DEVICES_GENERIC_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(GENERIC_SRCS)
-else
 APPSRC += $(GENERIC_SRCS)
-endif
 
 ifeq ($(APP_CLUSTERS_MEASUREMENT_AND_SENSING_SRC), 1)
 # All measurement and sensing cluster files
 MSSRCS:=$(shell cd $(CLUSTERS_MEASUREMENT_AND_SENSING_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(MSSRCS)
-else
 APPSRC += $(MSSRCS)
-endif
 endif
 
 ifeq ($(APP_CLUSTER_LIGHTING_SRC), 1)
 # All Lighting cluster files
 LSRCS:=$(shell cd $(CLUSTER_LIGHTING_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(LSRCS)
-else
 APPSRC += $(LSRCS)
-endif
 ZLO_SRCS:=$(shell cd $(DEVICES_ZLO_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(ZLO_SRCS)
-else
 APPSRC += $(ZLO_SRCS)
-endif
 endif
 
 ifeq ($(APP_CLUSTERS_HVAC_SRC), 1)
 # All HVAC cluster files
 HVACSRCS:=$(shell cd $(CLUSTERS_HVAC_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(HVACSRCS)
-else
 APPSRC += $(HVACSRCS)
-endif
-
 # All HVAC devices
 HVAC_HOME_SRC :=$(shell cd $(DEVICES_HVAC_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(HVAC_HOME_SRC)
-else
 APPSRC += $(HVAC_HOME_SRC)
-endif
 endif
 
 ifeq ($(APP_CLUSTERS_CLOSURES_SRC), 1)
 # All Closures cluster files
 CLSSRCS:=$(shell cd $(CLUSTERS_CLOSURES_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(CLSSRCS)
-else
 APPSRC += $(CLSSRCS)
-endif
-
 # All CLosure devices
 CLS_HOME_SRC :=$(shell cd $(DEVICES_CLOSURES_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(CLS_HOME_SRC)
-else
 APPSRC += $(CLS_HOME_SRC)
-endif
-
 endif
 
 
 ifeq ($(APP_CLUSTERS_SECURITY_AND_SAFETY_SRC), 1)
 # All SecurityAndSafety cluster files
 IASSRCS:=$(shell cd $(CLUSTERS_SECURITY_AND_SAFETY_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(IASSRCS)
-else
 APPSRC += $(IASSRCS)
-endif
-
 SECURITY_AND_SAFETY_HOME_SRC :=$(shell cd $(DEVICES_SECURITY_AND_SAFETY_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(SECURITY_AND_SAFETY_HOME_SRC)
-else
 APPSRC += $(SECURITY_AND_SAFETY_HOME_SRC)
-endif
 endif
 
 ifeq ($(APP_CLUSTERS_SMART_ENERGY_SRC), 1)
 # Selected Smart Energy cluster files
 SESRCS:=$(shell cd $(CLUSTERS_SMART_ENERGY_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(SESRCS)
-else
 APPSRC += $(SESRCS)
-endif
-
 SMART_ENERGY_HOME_SRC :=$(shell cd $(DEVICES_SMART_ENERGY_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(SMART_ENERGY_HOME_SRC)
-else
 APPSRC += $(SMART_ENERGY_HOME_SRC)
-endif
 endif
 
 # OTA files 
 ifeq ($(APP_CLUSTERS_OTA_SRC), 1)
 OTASRCS:= $(shell cd $(CLUSTERS_OTA_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(OTASRCS)
-else
 APPSRC += $(OTASRCS)
-endif
 endif
 
 ifeq ($(APP_CLUSTER_COMMISSIONING_SRC), 1)
 # All Commissioning cluster files
 COMSRCS:=$(shell cd $(CLUSTERS_COMMISSIOING_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(COMSRCS)
-else
 APPSRC += $(COMSRCS)
-endif
 endif
 
 ifeq ($(APP_CLUSTERS_APPLIANCE_MANAGEMENT_SRC), 1)
 # All ApplianceManagement cluster files
 AMSRCS:=$(shell cd $(CLUSTERS_APPLIANCE_MANAGEMENT_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(AMSRCS)
-else
 APPSRC += $(AMSRCS)
-endif
 # All ApplianceManagement devices
 APPLIANCE_MANAGEMENT_SRC :=$(shell cd $(DEVICES_APPLIANCE_MANAGEMENT_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(APPLIANCE_MANAGEMENT_SRC)
-else
 APPSRC += $(APPLIANCE_MANAGEMENT_SRC)
-endif
 endif
 
 
 # ZCL now built from source
 ZCLSRCS:= $(shell cd $(ZCIF_SRC); ls *.c)
-ifeq ($(RAMOPT), 1)
-ZCLAPPSRC += $(ZCLSRCS)
-else
 APPSRC += $(ZCLSRCS)
-endif
 
 
 ###############################################################################

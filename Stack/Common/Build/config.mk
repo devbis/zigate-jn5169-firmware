@@ -93,11 +93,7 @@ $(info JENNIC_STACK is undefined, defaulting to MAC)
 JENNIC_STACK ?= MAC
 endif
 
-ifneq ($(wildcard $(STACK_BASE_DIR)/$(JENNIC_STACK)/Legacy),)
-    include $(STACK_BASE_DIR)/$(JENNIC_STACK)/Legacy/config_$(JENNIC_STACK).mk
-else
-    include $(STACK_BASE_DIR)/$(JENNIC_STACK)/Build/config_$(JENNIC_STACK).mk
-endif
+include $(STACK_BASE_DIR)/$(JENNIC_STACK)/Build/config_$(JENNIC_STACK).mk
 
 ###############################################################################
 # Setup path for default stack size definition for the selected stack
