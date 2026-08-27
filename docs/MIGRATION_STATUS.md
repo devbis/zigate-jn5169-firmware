@@ -132,6 +132,16 @@ link flags); that hunk must be reconciled with `app/Build/.../Makefile`.
 - **Zero-init IKEA payloads** — `app_zcl_event_handler.c` IKEA remote scene path
   (`psIkeaRemoteSceneCustomPayload`, ~line 1207) must zero-initialise the
   payload before population.
-- **Xiaomi coordinator manufacturer mutation** — make the global manufacturer-code
-  override conditional so it is skipped when the host advertises support via the
-  `0x0D0F` capability negotiation.
+- **Coordinator manufacturer code — negotiated command, not hidden mutation.**
+  Do **not** port OpenLumi's implicit join-time global manufacturer-code
+  override. Instead implement the explicit, host-driven, validated command
+  specified in `docs/DIAGNOSTIC_ABI_MANUFACTURER_CODE.md`
+  (`0x0D16`/`0x8D16`, capability bit `1 << 10`, ops GET/SET/RESTORE_DEFAULT with
+  mandatory readback). The firmware performs no automatic manufacturer-code
+  mutation on join. The command rewrites the single **global** Node Descriptor
+  and reports the effective global value on readback; it does **not** and cannot
+  scope per device — per-device isolation is arranged host-side by serialising
+  coordinator use (see the Go lease in `zigbee/manufcode_lease.go`). The
+  capability bit is advertised only when the command is actually implemented, so
+  stock/unimplemented builds remain backward compatible (host sees
+  `ErrUnsupported`).
