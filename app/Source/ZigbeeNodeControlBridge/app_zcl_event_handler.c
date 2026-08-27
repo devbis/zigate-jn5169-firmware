@@ -1788,6 +1788,12 @@ PUBLIC void APP_vBdbCallback(BDB_tsBdbEvent *psBdbEvent)
             break;
 
         case BDB_EVENT_NWK_FORMATION_FAILURE:
+            /* Emit a definite failure R8024 so the host is not left waiting
+             * for the formed event until timeout. Declared in app_Znc_cmds.c. */
+            {
+                extern void APP_vSendFormationFailedEventToHost ( void );
+                APP_vSendFormationFailedEventToHost();
+            }
             break;
 
         default:

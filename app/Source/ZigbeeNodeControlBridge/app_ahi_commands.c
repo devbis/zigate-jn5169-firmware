@@ -250,9 +250,22 @@ PRIVATE void vAPP_AHISetTxPower(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, 
         u8TxPower = pu8LinkRxBuffer[ u32BytesRead ];
         u32BytesRead += sizeof(u8TxPower);
 
-        if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS)
+        /*
+         * Validate against the supported PHY encoding using the SDK macro. The
+         * selected MiniMac shim defines PHY_PIB_TX_POWER_MAX = 0x40 (the 3 dB
+         * tolerance code IS a valid setting), so 0x40 must NOT be rejected. The
+         * authoritative acceptance is the eAppApiPlmeSet result; the range
+         * check simply rejects clearly out-of-range codes before the PIB write.
+         * On rejection the outer dispatch still emits the stock
+         * E_SL_MSG_STATUS frame and omits the value frame, so the existing
+         * wire response shape is unchanged.
+         */
+        if (u8TxPower <= PHY_PIB_TX_POWER_MAX)
         {
-            *peAHIStatus = E_AHI_SUCCESS;
+            if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS)
+            {
+                *peAHIStatus = E_AHI_SUCCESS;
+            }
         }
     }
 }

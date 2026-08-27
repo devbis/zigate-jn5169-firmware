@@ -100,6 +100,30 @@ typedef enum
     E_SL_MSG_NODE_FACTORY_NEW_RESTART                          =   0x8007,
     E_SL_MSG_GET_VERSION                                       =   0x0010,
     E_SL_MSG_VERSION_LIST                                      =   0x8010,
+    E_SL_MSG_GET_TCLK_DIAGNOSTIC                               =   0x0D00,
+    E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE                          =   0x8D00,
+
+    /* Compact versioned read-only custom diagnostic extension.
+     * These IDs are locally unused in this source tree; hosts must negotiate
+     * protocol version/capabilities via 0x0D0F before relying on them. */
+    E_SL_MSG_CAPABILITY_REQ                                    =   0x0D0F,
+    E_SL_MSG_CAPABILITY_RSP                                    =   0x8D0F,
+    E_SL_MSG_GROUP_OP_REQ                                      =   0x0D12,
+    E_SL_MSG_GROUP_OP_RSP                                      =   0x8D12,
+    E_SL_MSG_GROUP_LIST_REQ                                    =   0x0D13,
+    E_SL_MSG_GROUP_LIST_RSP                                    =   0x8D13,
+    E_SL_MSG_LOCAL_NEIGHBOUR_REQ                               =   0x0D14,
+    E_SL_MSG_LOCAL_NEIGHBOUR_RSP                               =   0x8D14,
+    E_SL_MSG_LOCAL_ROUTE_REQ                                   =   0x0D15,
+    E_SL_MSG_LOCAL_ROUTE_RSP                                   =   0x8D15,
+    /* Negotiated coordinator manufacturer-code override (GET/SET/RESTORE with
+     * mandatory Node Descriptor readback). Advertised via capability bit 1<<10
+     * only when implemented; replaces OpenLumi's hidden join-time global
+     * mutation. See custom_diag.c and docs/DIAGNOSTIC_ABI_MANUFACTURER_CODE.md. */
+    E_SL_MSG_MANUFACTURER_CODE_REQ                             =   0x0D16,
+    E_SL_MSG_MANUFACTURER_CODE_RSP                             =   0x8D16,
+    E_SL_MSG_GENERAL_DIAG_REQ                                  =   0x0D1F,
+    E_SL_MSG_GENERAL_DIAG_RSP                                  =   0x8D1F,
 
     E_SL_MSG_NETWORK_STATE_REQ                                 =   0x0009,
     E_SL_MSG_NETWORK_STATE_RSP                                 =   0x8009,
@@ -437,4 +461,3 @@ PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length, uint8 *pu8Data)
 /****************************************************************************/
 /***        END OF FILE                                                   ***/
 /****************************************************************************/
-

@@ -221,6 +221,8 @@ APPSRC += SerialLink.c
 APPSRC += uart.c
 APPSRC += pdum_apdu.S
 APPSRC += app_ota_server.c
+APPSRC += tclk_diagnostic.c
+APPSRC += custom_diag.c
 ifeq ($(JENNIC_CHIP_FAMILY),JN517x)
 APPSRC += AHI_ModuleConfiguration.c
 endif
@@ -251,6 +253,12 @@ endif
 
 LIBNAME = $(TARGET)_PDM$(PDM_BUILD_TYPE)_BAUD_$(BAUD)_DEBUG_$(DEBUG)
 
+# Link-time interposition for read-only TCLK diagnostics. No library member is
+# modified and every wrapper returns the original value unchanged.
+LDFLAGS += -Wl,--wrap=zps_eAplApsmeConfirmKeyReqRsp
+LDFLAGS += -Wl,--wrap=ZPS_u16NwkNibFindNwkAddr
+LDFLAGS += -Wl,--wrap=zps_eAplSecEncryptPacket
+LDFLAGS += -Wl,--wrap=zps_vGenerateHashForVerifiedKey
 
 
 ###############################################################################
@@ -382,8 +390,6 @@ $(GENERATED_FILE_NAME).elf: $(APPOBJS) $(addsuffix.a,$(addprefix $(COMPONENTS_BA
 	$(CC) -Wl,--gc-sections -Wl,-u_AppColdStart -Wl,-u_AppWarmStart $(LDFLAGS) -T$(ZNCLKCMD) -o $@ -Wl,--start-group $(APPOBJS) $(addprefix -l,$(LDLIBS))  -lm -Wl,--end-group -Wl,-Map,$(GENERATED_FILE_NAME).map
 
 	$(SIZE) $@
-	date +%c >> $(APP_BASE)/Doc/size.txt
-	$(SIZE) $@ >> $(APP_BASE)/Doc/size.txt
 
 # Do a second linking with LTO disabled
 	$(CC) -Wl,--cref -Wl,--gc-sections -Wl,-u_AppColdStart -Wl,-u_AppWarmStart $(LDFLAGS) -T$(ZNCLKCMD) -L $(SDK_BASE_DIR)/Stack/ZCL/Build/  -o $@ -Wl,--start-group $(APPOBJS) $(addprefix -l,$(LDLIBS)) -lm -Wl,--end-group -fno-lto -Wl,-Map,$(GENERATED_FILE_NAME)_NOLTO.map
@@ -412,4 +418,3 @@ clean:
 	rm -f $(APP_SRC_DIR)/pdum_gen.* $(APP_SRC_DIR)/zps_gen*.* $(APP_SRC_DIR)/pdum_apdu.*
 
 ###############################################################################
-

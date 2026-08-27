@@ -79,6 +79,8 @@
 #include "PDM_IDs.h"
 #include "ApplianceStatistics.h"
 #include "bdb_DeviceCommissioning.h"
+#include "tclk_diagnostic.h"
+#include "custom_diag.h"
 
 //FRED IASWD
 #include "IASWD.h"
@@ -103,6 +105,18 @@
 #ifndef VERSION
 #define VERSION    0x00030323
 #endif
+
+/* Keep the deterministic diagnostic build id anchored to the real firmware
+ * version: fail the build if custom_diag.h drifts from the local VERSION. */
+typedef char diag_version_sync_assert[(DIAG_FW_VERSION == VERSION) ? 1 : -1];
+
+/* R8024 status byte emitted on an asynchronous network formation failure.
+ * Uses the stack's own NLME-NETWORK-FORMATION failure enumeration
+ * ZPS_NWK_ENUM_STARTUP_FAILURE (0xC4, from zps_nwk_sap.h). This is distinct
+ * from 1 (successful new formation), 4 (already on a network) and the BDB
+ * status space (BDB_E_ERROR_COMMISSIONING_IN_PROGRESS == 6), so it cannot be
+ * confused with any BDB enum value. */
+#define APP_R8024_STATUS_FORMATION_FAILURE   (ZPS_NWK_ENUM_STARTUP_FAILURE)
 /****************************************************************************/
 /***    Type Definitions                          ***/
 /****************************************************************************/
@@ -192,6 +206,7 @@ PRIVATE void APP_vControlNodeScanStart ( void );
 #endif
 
 PRIVATE void APP_vControlNodeStartNetwork ( void );
+PRIVATE void APP_vSendAlreadyOnNetworkEvent ( uint8 *pu8Buffer );
 
 
 PRIVATE ZPS_teStatus APP_eZdpMgmtLqiRequest ( uint16    u16Addr,
@@ -366,26 +381,55 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                                    0 );
 
                 uint16 u16ResponseCode = E_SL_MSG_AHI_GET_TX_POWER_RSP;
-                // In case of Set TX power use Get TX power to get current TX level
+                /*
+                 * The generic 0x8000 above already carries the status of the
+                 * requested command (set OR get). Only perform the readback and
+                 * emit the 0x8806/0x8807 value frame when the command actually
+                 * succeeded: for a SET, both the set AND the follow-up get must
+                 * succeed; a failed set must not emit a value frame and must
+                 * leave the generic 0x8000 reporting failure.
+                 */
+                uint8  u8CmdStatus = u8Status;   /* status of the requested command */
+                bool_t bEmitValue;
                 if (u16PacketType == E_SL_MSG_AHI_SET_TX_POWER)
                 {
-                    u32AHIresponse = APP_vCMDHandleAHICommand(E_SL_MSG_AHI_GET_TX_POWER, 0, au8LinkRxBuffer, &u8Status);
                     u16ResponseCode = E_SL_MSG_AHI_SET_TX_POWER_RSP;
+                    if (u8CmdStatus == E_AHI_SUCCESS)
+                    {
+                        uint8 u8GetStatus = E_AHI_PARSE_ERROR;
+                        u32AHIresponse = APP_vCMDHandleAHICommand(E_SL_MSG_AHI_GET_TX_POWER, 0, au8LinkRxBuffer, &u8GetStatus);
+                        bEmitValue = (u8GetStatus == E_AHI_SUCCESS);
+                    }
+                    else
+                    {
+                        bEmitValue = FALSE;
+                    }
+                }
+                else
+                {
+                    bEmitValue = (u8CmdStatus == E_AHI_SUCCESS);
                 }
                 // Only return value if command succeed.
-                // TX power value range is 0x00-0xbf so uint8 is big enough
-                if ( u8Status == E_AHI_SUCCESS)
+                // TX power value range is 0x00-0x40 (MiniMac) so uint8 is big enough
+                if ( bEmitValue )
                 {
-                    // Convert raw level to mapped value(-dBM) JN516X only not
-                    uint8 u8TXlevelRaw = (0x3f & u32AHIresponse) & 0xFF;
+                    /*
+                     * Preserve the stock two-application-byte response SHAPE
+                     * (vSL_WriteMessage appends the LQI byte). Byte 0 is the
+                     * FULL PIB raw value (0x00..0x40) so 0x40 is echoed intact
+                     * and an exact raw restore/echo is possible; byte 1 is the
+                     * legacy mapped value computed from the masked 6-bit level.
+                     */
+                    uint8 u8TXrawFull   = (uint8)(u32AHIresponse & 0xFFU);
+                    uint8 u8TXlevelMask = u8TXrawFull & PHY_PIB_TX_POWER_MASK;
                     uint8 u8TXlevel;
-                    if (u8TXlevelRaw <= 31) { u8TXlevel = 0; }
-                    else if (u8TXlevelRaw <= 39) { u8TXlevel = 32; }
-                    else if (u8TXlevelRaw <= 51) { u8TXlevel = 20; }
-                    else if (u8TXlevelRaw <= 63) { u8TXlevel = 9; }
+                    if (u8TXlevelMask <= 31) { u8TXlevel = 0; }
+                    else if (u8TXlevelMask <= 39) { u8TXlevel = 32; }
+                    else if (u8TXlevelMask <= 51) { u8TXlevel = 20; }
+                    else { u8TXlevel = 9; }   /* masked level is 6-bit: 52..63 */
 
                     u8Length = 0;
-                    ZNC_BUF_U8_UPD  ( &au8values[ 0 ], u8TXlevelRaw,   u8Length );
+                    ZNC_BUF_U8_UPD  ( &au8values[ 0 ], u8TXrawFull,    u8Length );
                     ZNC_BUF_U8_UPD  ( &au8values[ 1 ], u8TXlevel,      u8Length );
                     vSL_WriteMessage ( u16ResponseCode,
                                        u8Length,
@@ -451,8 +495,92 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             }
             break;
 
+            case (E_SL_MSG_GET_TCLK_DIAGNOSTIC):
+            {
+                uint8 au8Diagnostic[sizeof(TCLKDIAG_tsState) + 1];
 
-            case (E_SL_MSG_SET_EXT_PANID):
+                if (u16PacketLength != 0)
+                {
+                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
+                }
+                else if (!TCLKDIAG_bSnapshot(au8Diagnostic))
+                {
+                    u8Status = E_SL_MSG_STATUS_BUSY;
+                }
+
+                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8Status,      u8Length );
+                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8SeqNum,      u8Length );
+                ZNC_BUF_U16_UPD ( &au8values[ u8Length ], u16PacketType, u8Length );
+                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8RequestSent, u8Length );
+                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8SeqApsNum,   u8Length );
+                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], PDUM_u8GetNpduUse(), u8Length );
+                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8GetApduUse(), u8Length );
+
+                vSL_WriteMessage(E_SL_MSG_STATUS,
+                                 u8Length,
+                                 au8values,
+                                 0);
+                if (u8Status == E_SL_MSG_STATUS_SUCCESS)
+                {
+                    vSL_WriteMessage(E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE,
+                                     sizeof(TCLKDIAG_tsState),
+                                     au8Diagnostic,
+                                     0);
+                }
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_CAPABILITY_REQ):
+            {
+                CUSTOMDIAG_vHandleCapability(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_GENERAL_DIAG_REQ):
+            {
+                CUSTOMDIAG_vHandleGeneralDiag(u16PacketLength);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_LOCAL_NEIGHBOUR_REQ):
+            {
+                CUSTOMDIAG_vHandleNeighbours(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_LOCAL_ROUTE_REQ):
+            {
+                CUSTOMDIAG_vHandleRoutes(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_GROUP_OP_REQ):
+            {
+                CUSTOMDIAG_vHandleGroupOp(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_GROUP_LIST_REQ):
+            {
+                CUSTOMDIAG_vHandleGroupList(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_MANUFACTURER_CODE_REQ):
+            {
+                CUSTOMDIAG_vHandleManufCode(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+
+
             {
                 // If device type is 0(Coordinator) and network is already formed prevent changing EXT PANID
                 // JN-UG-3113 v1.5 Chapter 5.1.1
@@ -3637,6 +3765,21 @@ PRIVATE void APP_vControlNodeStartNetwork(void)
 #endif
         if( sZllState.u8DeviceType == ZPS_ZDO_DEVICE_COORD )
         {
+            /*
+             * If the coordinator is already on a network, report the
+             * stock-compatible "already on network" R8024 (status 4) with a
+             * valid short address, IEEE address and channel BEFORE touching the
+             * Trust Center credential flash or initialising formation, and
+             * without the unconditional PDM record saves that the normal
+             * formed-event path performs. This makes StartNetwork a safe probe
+             * on an already-formed coordinator (BDB_E_ERROR_NODE_IS_ON_A_NWK).
+             */
+            if( sBDB.sAttrib.bbdbNodeIsOnANetwork )
+            {
+                APP_vSendAlreadyOnNetworkEvent(au8Buffer);
+                return;
+            }
+
             ZPS_vTcInitFlash(&sSet, asTclkStruct);
             ZPS_vTCSetCallback(APP_bSendHATransportKey);
             if( psAib->u64ApsUseExtendedPanid == 0 )
@@ -3653,7 +3796,9 @@ PRIVATE void APP_vControlNodeStartNetwork(void)
             {
                 if (BDB_E_ERROR_NODE_IS_ON_A_NWK == u8Status)
                 {
-                    APP_vSendJoinedFormEventToHost(BDB_E_ERROR_NODE_IS_ON_A_NWK, au8Buffer);
+                    /* Fallback: BDB rejected formation because the node is on a
+                     * network. Emit the same stock status-4 event without saves. */
+                    APP_vSendAlreadyOnNetworkEvent(au8Buffer);
                 }
                 else
                 {
@@ -3842,9 +3987,14 @@ PUBLIC bool APP_bSendHATransportKey ( uint16    u16ShortAddress,
 {
     bool_t          bStatus     =  TRUE;
     ZPS_teStatus    eStatus;
-    uint16          u16Location;
-    AESSW_Block_u   uKey;
+    uint16          u16Location = TCLK_DIAGNOSTIC_U16_NA;
     bool_t          bCredPresent =  FALSE;
+
+    TCLKDIAG_vCallbackBegin(u16ShortAddress,
+                            u64DeviceAddress,
+                            u8Status,
+                            u16Mac,
+                            bSetTclkFlashFeature);
 
     if( bBlackListEnable )
     {
@@ -3894,18 +4044,26 @@ PUBLIC bool APP_bSendHATransportKey ( uint16    u16ShortAddress,
 		uint8 au8Key[16] = { 0x5a, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41,
 								  0x6c, 0x6c, 0x69, 0x61, 0x6e, 0x63, 0x65, 0x30, 0x39 };
 
-		ZPS_eAplZdoAddReplaceLinkKey( u64DeviceAddress, au8Key,   ZPS_APS_UNIQUE_LINK_KEY);
+        TCLKDIAG_vInsertionAttempted();
+		eStatus = ZPS_eAplZdoAddReplaceLinkKey( u64DeviceAddress,
+                                               au8Key,
+                                               ZPS_APS_UNIQUE_LINK_KEY);
+        ZPS_u8GrabMutexLock ( zps_vGetZpsMutex , &sZpsIntStore );
+        bCredPresent = zps_bGetFlashCredential(u64DeviceAddress,
+                                               NULL,
+                                               &u16Location,
+                                               FALSE,
+                                               FALSE);
+        TCLKDIAG_vInsertionResult(eStatus, bCredPresent, u16Location);
 		/*If credential is present roll back to confirm that key is used and not install code */
 		/*if(bCredPresent)
 		{
 			asTclkStruct[u16Location].u16TclkRetries = 0xFFFF;
 		}*/
-
-
-        ZPS_u8GrabMutexLock ( zps_vGetZpsMutex , &sZpsIntStore );
         bStatus = TRUE;
     }
 
+    TCLKDIAG_vCallbackEnd(bStatus);
     return bStatus;
 }
 
@@ -3968,6 +4126,81 @@ PUBLIC void APP_vSendJoinedFormEventToHost ( uint8    u8FormJoin,
 #endif
     }
 
+}
+
+
+/****************************************************************************
+ *
+ * NAME: APP_vSendAlreadyOnNetworkEvent
+ *
+ * DESCRIPTION:
+ *   Emit the stock-compatible R8024 (E_SL_MSG_NETWORK_JOINED_FORMED) with
+ *   status BDB_E_ERROR_NODE_IS_ON_A_NWK (4) and a valid short address, IEEE
+ *   address and channel, using the exact 12-byte wire layout produced by
+ *   APP_vSendJoinedFormEventToHost() for the status-4 case. Unlike that
+ *   function this path performs NO PDM/ZPS record saves and does not toggle
+ *   LED/OTA state, so querying an already-formed coordinator has no side
+ *   effect on persisted network identity.
+ *
+ ****************************************************************************/
+PRIVATE void APP_vSendAlreadyOnNetworkEvent ( uint8 *pu8Buffer )
+{
+    uint32  u32Channel = 0;
+    uint16  u16NwkAddr;
+    uint64  u64IeeeAddr;
+    uint8   u8Length = 0;
+
+    u16NwkAddr  =  ZPS_u16NwkNibGetNwkAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
+    u64IeeeAddr =  ZPS_u64NwkNibGetExtAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
+    eAppApiPlmeGet ( PHY_PIB_ATTR_CURRENT_CHANNEL, &u32Channel );
+
+    pu8Buffer[0] = BDB_E_ERROR_NODE_IS_ON_A_NWK;
+    ZNC_BUF_U8_UPD  ( &pu8Buffer[ 1 ],        BDB_E_ERROR_NODE_IS_ON_A_NWK, u8Length );
+    ZNC_BUF_U16_UPD ( &pu8Buffer[ u8Length ], u16NwkAddr,                   u8Length );
+    ZNC_BUF_U64_UPD ( &pu8Buffer[ u8Length ], u64IeeeAddr,                  u8Length );
+    ZNC_BUF_U8_UPD  ( &pu8Buffer[ u8Length ], (uint8)u32Channel,            u8Length );
+
+    vSL_WriteMessage ( E_SL_MSG_NETWORK_JOINED_FORMED,
+                       ( sizeof(uint8) + sizeof(uint16) + sizeof(uint64) + sizeof(uint8) ),
+                       pu8Buffer,
+                       0 );
+}
+
+
+/****************************************************************************
+ *
+ * NAME: APP_vSendFormationFailedEventToHost
+ *
+ * DESCRIPTION:
+ *   Emit a definite failure R8024 (E_SL_MSG_NETWORK_JOINED_FORMED) when an
+ *   asynchronous BDB_EVENT_NWK_FORMATION_FAILURE occurs, so the host is not
+ *   left waiting for the formed event until timeout. Uses the same 12-byte
+ *   wire layout with a distinct failure status (not 1 success, not 4 already-
+ *   on-network) and performs no PDM/ZPS saves.
+ *
+ ****************************************************************************/
+PUBLIC void APP_vSendFormationFailedEventToHost ( void )
+{
+    uint8   au8Buffer[14];
+    uint32  u32Channel = 0;
+    uint16  u16NwkAddr;
+    uint64  u64IeeeAddr;
+    uint8   u8Length = 0;
+
+    u16NwkAddr  =  ZPS_u16NwkNibGetNwkAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
+    u64IeeeAddr =  ZPS_u64NwkNibGetExtAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
+    eAppApiPlmeGet ( PHY_PIB_ATTR_CURRENT_CHANNEL, &u32Channel );
+
+    au8Buffer[0] = APP_R8024_STATUS_FORMATION_FAILURE;
+    ZNC_BUF_U8_UPD  ( &au8Buffer[ 1 ],        APP_R8024_STATUS_FORMATION_FAILURE, u8Length );
+    ZNC_BUF_U16_UPD ( &au8Buffer[ u8Length ], u16NwkAddr,                         u8Length );
+    ZNC_BUF_U64_UPD ( &au8Buffer[ u8Length ], u64IeeeAddr,                        u8Length );
+    ZNC_BUF_U8_UPD  ( &au8Buffer[ u8Length ], (uint8)u32Channel,                  u8Length );
+
+    vSL_WriteMessage ( E_SL_MSG_NETWORK_JOINED_FORMED,
+                       ( sizeof(uint8) + sizeof(uint16) + sizeof(uint64) + sizeof(uint8) ),
+                       au8Buffer,
+                       0 );
 }
 
 
