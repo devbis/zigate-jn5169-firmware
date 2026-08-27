@@ -573,6 +573,20 @@ PRIVATE void APP_ZCL_cbEndpointCallback ( tsZCL_CallBackEvent*    psEvent )
                 vLog_Printf(TRACE_ZB_CONTROLBRIDGE_TASK,LOG_DEBUG,"\nEl�ment : %d\n",i);
                 while ( i <  u16Elements )
                 {
+                    /* SAFETY FIX (256-byte serialisation OOB): au8LinkTxBuffer
+                     * is a 256-byte stack buffer and vSL_WriteMessage() appends
+                     * one LQI byte past u16Length. A long octet string
+                     * (E_ZCL_L*STRING) or large multi-element array attribute
+                     * could otherwise serialise past the buffer end and corrupt
+                     * the stack. Stop once the next worst-case element
+                     * (uint64 = 8 bytes) would not fit within the buffer with
+                     * the LQI byte reserved. Truncation is safe; overflow is
+                     * not. */
+                    if ( (uint32)u16Length + sizeof(uint64) >
+                             (sizeof(au8LinkTxBuffer) - 1U) )
+                    {
+                        break;
+                    }
                     if( ( psEvent->uMessage.sIndividualAttributeResponse.eAttributeDataType ==  E_ZCL_OSTRING ) ||
                         ( psEvent->uMessage.sIndividualAttributeResponse.eAttributeDataType ==  E_ZCL_CSTRING ) )
                     {
@@ -1202,6 +1216,17 @@ PRIVATE void APP_ZCL_cbEndpointCallback ( tsZCL_CallBackEvent*    psEvent )
                     break; // SCENE MEMBERSHIP RESPONSE
 
 #ifdef ZIGATE_ENABLE_OPENLUMI_PRIVATE_QUIRKS
+                    /* NOTE (IKEA payload zero-init safety fix): this private
+                     * OpenLumi path depends on a modified-SDK Scenes custom
+                     * command (E_CLD_SCENES_CMD_IKEA_REMOTE_*) that is NOT
+                     * present in stock v2395, so it is gated off and there is no
+                     * compiled allocation of psIkeaRemoteSceneCustomPayload in
+                     * this baseline. If this quirk is ever enabled by
+                     * forward-porting the SDK Scenes extension, the receive
+                     * handler MUST zero-initialise the payload struct at
+                     * allocation before parsing the (possibly short) incoming
+                     * frame, so that u8Attr1/u8Attr2/u8Attr3 cannot leak
+                     * uninitialised stack bytes to the host here. */
                     case (E_CLD_SCENES_CMD_IKEA_REMOTE_SHORT_CLICK):
                     case (E_CLD_SCENES_CMD_IKEA_REMOTE_BUTTON_DOWN):
                     case (E_CLD_SCENES_CMD_IKEA_REMOTE_BUTTON_UP):

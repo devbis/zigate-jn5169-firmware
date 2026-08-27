@@ -1086,29 +1086,24 @@ PUBLIC void APP_vHandleStackEvents ( ZPS_tsAfEvent*    psStackEvent )
 					ZNC_BUF_U8_UPD  ( &au8LinkTxBuffer [u16Length] ,  psStackEvent->uEvent.sNwkJoinIndicationEvent.u8Capability,   u16Length );
 					ZNC_BUF_U8_UPD  ( &au8LinkTxBuffer [u16Length] ,  psStackEvent->uEvent.sNwkJoinIndicationEvent.u8Rejoin,   u16Length );
 
-					// fix Xiaomi MCGQ14LM node descriptor custom
-					uint64 u64addr;
-					uint8 macManuf[3];
-					zps_tsApl *  s_sApl = ( zps_tsApl * ) ZPS_pvAplZdoGetAplHandle ();
-					u64addr = psStackEvent->uEvent.sNwkJoinIndicationEvent.u64ExtAddr;
-					macManuf[0] = (u64addr >> 56);
-					macManuf[1] = (u64addr >> 48);
-					macManuf[2] = (u64addr >> 40);
-					 // fix Xiaomi MCGQ14LM
-					if ( (((macManuf[0] == 0x04) &&
-							(macManuf[1] == 0xcf) &&
-							(macManuf[2] == 0x8c))) ||
-						 (((macManuf[0] == 0x54) &&
-							(macManuf[1] == 0xef) &&
-							(macManuf[2] == 0x44)))
-						)
-					{
-						s_sApl->sAfContext.psNodeDescriptor->u16ManufacturerCode = 0x115f;
-					}else{
-
-						s_sApl->sAfContext.psNodeDescriptor->u16ManufacturerCode = ZCL_MANUFACTURER_CODE;
-
-					}
+					/*
+					 * SAFETY FIX (ZiGate/JN5169 migration): the upstream
+					 * OpenLumi build mutated the GLOBAL coordinator Node
+					 * Descriptor u16ManufacturerCode to 0x115f (Lumi/Xiaomi)
+					 * here, keyed on the joining device's MAC OUI, on every
+					 * NWK_NEW_NODE_HAS_JOINED event. That hidden global
+					 * mutation cross-contaminates concurrent device
+					 * interviews (the coordinator descriptor is process-wide,
+					 * not per-device) and is opaque to the host.
+					 *
+					 * It is intentionally removed here. Manufacturer-code
+					 * override is now an explicit, host-negotiated operation
+					 * via the diagnostic command 0x0D16/0x8D16 (capability
+					 * bit 1<<10) with GET/SET/RESTORE + mandatory Node
+					 * Descriptor readback, so the host owns the (still
+					 * global) descriptor state and can serialize access.
+					 * See docs/DIAGNOSTIC_ABI_MANUFACTURER_CODE.md.
+					 */
 
 					vSL_WriteMessage ( E_SL_MSG_DEVICE_ANNOUNCE,
 									   u16Length,
