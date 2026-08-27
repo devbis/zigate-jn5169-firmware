@@ -579,7 +579,7 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             }
             break;
 
-
+            case (E_SL_MSG_SET_EXT_PANID):
             {
                 // If device type is 0(Coordinator) and network is already formed prevent changing EXT PANID
                 // JN-UG-3113 v1.5 Chapter 5.1.1

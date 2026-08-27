@@ -68,11 +68,21 @@ off size field
                         0x01 INVALID (validation/readback failed)
                         0x02 UNSUPPORTED_OP
  2   2   effective code (uint16)  code now in the GLOBAL Node Descriptor (readback)
- 4   2   default code   (uint16)  firmware baked-in default (RESTORE target)
+ 4   2   default code   (uint16)  shipped Node-Descriptor default (RESTORE target)
 ```
 
 The trailing LQI byte that `vSL_WriteMessage` appends is **not** part of the
 application payload; the host strips it (as with every other custom response).
+
+The **default code** is the manufacturer code the coordinator's Node Descriptor
+booted with — i.e. the `.zpscfg` `<NodeDescriptor ManufacturerCode="4423">`
+(**0x1147**) that `zps_gen.c` bakes in. The firmware **snapshots the live
+descriptor exactly once, before any SET can mutate it**, and uses that runtime
+value as the single source of truth for `default code` and RESTORE_DEFAULT
+(falling back to the compile-time `0x1147` only if the descriptor is
+unavailable at the first call). Note this is **not** `ZCL_MANUFACTURER_CODE`
+(0x1037), which is the ZCL Basic-cluster attribute default — a different value
+that must never be used to restore the ZDP Node Descriptor.
 
 ### Semantics
 

@@ -41,7 +41,6 @@
 #include "mac_sap.h"
 #include "bdb_api.h"
 #include "custom_diag.h"
-#include "zcl_options.h"   /* ZCL_MANUFACTURER_CODE (baked-in default) */
 
 /****************************************************************************/
 /***        External application state                                    ***/
@@ -404,9 +403,13 @@ PUBLIC void CUSTOMDIAG_vHandleNeighbours(uint16 u16Len, const uint8 *pu8Rx)
         }
 
         /* Only resolve the mapped IEEE address when the entry is used and its
-         * lookup index is within the address-map bounds; otherwise the mapped
-         * IEEE is meaningless, so emit the all-FF unavailable sentinel. */
-        if (u8Used != 0U && sEntry.u16Lookup < psNib->sTblSize.u16AddrMap)
+         * lookup index is within the MAC address-table bounds; otherwise the
+         * mapped IEEE is meaningless, so emit the all-FF unavailable sentinel.
+         * u16Lookup indexes the MAC address table (pu64AddrExtAddrMap, sized
+         * u16MacAddTableSize) consumed by ZPS_u64NwkNibGetMappedIeeeAddr() --
+         * NOT the smaller nwkAddressMap (u16AddrMap). The removed/unused
+         * sentinel 0xFFFF is naturally excluded by this bound. */
+        if (u8Used != 0U && sEntry.u16Lookup < psNib->sTblSize.u16MacAddTableSize)
         {
             u64Ieee = ZPS_u64NwkNibGetMappedIeeeAddr(pvNwk, sEntry.u16Lookup);
         }
@@ -755,13 +758,22 @@ PUBLIC void CUSTOMDIAG_vHandleGroupList(uint16 u16Len, const uint8 *pu8Rx)
 
 PUBLIC void CUSTOMDIAG_vHandleManufCode(uint16 u16Len, const uint8 *pu8Rx)
 {
+    /* The true shipped default is the manufacturer code the generated Node
+     * Descriptor booted with. Snapshot it exactly ONCE, before any SET can
+     * mutate the single global descriptor, and treat that runtime value as the
+     * source of truth for RESTORE_DEFAULT and the "default code" field. Because
+     * the only former mutator (OpenLumi's join-time Xiaomi rewrite) has been
+     * removed, the first handler entry always observes the boot default. */
+    static bool_t s_bManufDefaultCaptured  = FALSE;
+    static uint16 s_u16ManufDefaultSnapshot = DIAG_MANUF_CODE_SHIPPED_DEFAULT;
+
     uint8   u8ReqVersion;
     uint8   u8Op;
     uint16  u16ReqCode;
     uint8   u8Length  = 0;
     uint8   u8Status;
     uint16  u16Effective;
-    const uint16 u16Default = (uint16)ZCL_MANUFACTURER_CODE;
+    uint16  u16Default = DIAG_MANUF_CODE_SHIPPED_DEFAULT;
     ZPS_tsAplAfNodeDescriptor *psDesc;
 
     /* Strict fixed-length + version validation -> outer 0x8000 rejection. */
@@ -790,12 +802,22 @@ PUBLIC void CUSTOMDIAG_vHandleManufCode(uint16 u16Len, const uint8 *pu8Rx)
 
     if (psDesc == NULL)
     {
-        /* No live descriptor: report INVALID with sentinel effective. */
+        /* No live descriptor: report INVALID with sentinel effective and the
+         * best-known default (prior snapshot or the shipped fallback). */
         u8Status     = DIAG_MANUF_STATUS_INVALID;
         u16Effective = DIAG_U16_NA;
+        u16Default   = s_u16ManufDefaultSnapshot;
     }
     else
     {
+        /* Capture the shipped default exactly once, BEFORE applying any op. */
+        if (!s_bManufDefaultCaptured)
+        {
+            s_u16ManufDefaultSnapshot = psDesc->u16ManufacturerCode;
+            s_bManufDefaultCaptured   = TRUE;
+        }
+        u16Default = s_u16ManufDefaultSnapshot;
+
         switch (u8Op)
         {
             case DIAG_MANUF_OP_GET:

@@ -216,6 +216,20 @@
 #define DIAG_MANUF_STATUS_INVALID       (1U)
 #define DIAG_MANUF_STATUS_UNSUPPORTED_OP (2U)
 
+/* Shipped coordinator Node Descriptor manufacturer code. This MUST mirror
+ * ZigbeeNodeControlBridgeCoordinator_GP_Proxy.zpscfg
+ *   <NodeDescriptor ManufacturerCode="4423" .../>   (4423 == 0x1147)
+ * which zps_gen.c bakes into the live descriptor at boot. It is the
+ * RESTORE_DEFAULT target and the "default code" response field.
+ *
+ * NOTE: this is deliberately NOT ZCL_MANUFACTURER_CODE (0x1037) -- that is the
+ * ZCL Basic-cluster attribute default, a different value that must not be used
+ * to restore the ZDP Node Descriptor. The handler snapshots the LIVE descriptor
+ * once before any SET can mutate it and prefers that runtime value as the
+ * single source of truth; this constant is only the fallback used if the
+ * descriptor is unavailable at the first call. */
+#define DIAG_MANUF_CODE_SHIPPED_DEFAULT (0x1147U)
+
 /****************************************************************************/
 /***        Sentinels                                                     ***/
 /****************************************************************************/

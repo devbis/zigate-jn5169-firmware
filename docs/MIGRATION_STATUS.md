@@ -17,17 +17,38 @@ The requested image **compiles and links**:
 WWAH=0). Two clean builds are **byte-identical** (`.bin` and `.elf`):
 
 ```
-bin sha256 0f314f98072527c861627ba767d23cc24188b5ebf310553964a40648614c1b9c
-elf sha256 4b5ef213ad7567a8b181dd51bf420e84cd7d6e8de1f1ebd9c148b24c203e14f7
-text=252612  data=2028  bss=30161
+bin sha256 e4f007969e248f04cd8b49694ed3019a00208c07ca2fa51aad1444af20d7a329
+elf sha256 d903dc164dc6283b1dec9c751b8e58e725aaf4fe712e607e68942483eb2fcfda
+text=252808  data=2032  bss=30157
 RAM headroom = 0x7fb4 - (_minimum_heap_end 0x664c + __stack_size 0x1770)
              = 32692 - 32188 = 504 bytes
 ```
 
-(Hashes above are for **proto 1.2 / build rev 4** — rev4 TX-power semantics +
-TCLK 0x0D00 removal. The previous rev3 image was
-`bin 7a878ca6… / elf 872b6d5d…`, text=253416 data=2096 bss=30157; rev4 removed
-804 B of flash text and 68 B of `.data` by deleting the TCLK subsystem.)
+(Hashes above are for **proto 1.2 / build rev 4** after the independent-review
+fixes below. The pre-review rev4 image was
+`bin 0f314f98… / elf 4b5ef213…`; restoring the `E_SL_MSG_SET_EXT_PANID` case
+label re-included previously dead-code-eliminated handler code, +196 B text.
+The earlier rev3 image was `bin 7a878ca6… / elf 872b6d5d…`.)
+
+### Independent-review fixes (applied before final build)
+
+1. **`case E_SL_MSG_SET_EXT_PANID` restored** in `app_Znc_cmds.c`. The manuf-code
+   case insertion had dropped the label, orphaning the ExtPANID handler
+   (`ZPS_eAplAibSetApsUseExtendedPanId`) as unreachable dead code so
+   `0x0020` silently fell through to default. The label is restored; the block
+   is reachable again.
+2. **Manufacturer RESTORE_DEFAULT / default field** now uses the **actual
+   shipped Node-Descriptor default 0x1147** (`.zpscfg`
+   `ManufacturerCode="4423"`), captured by snapshotting the live descriptor
+   **once before any SET** (single source of truth), not the wrong
+   `ZCL_MANUFACTURER_CODE` (0x1037). `DIAG_MANUF_CODE_SHIPPED_DEFAULT` (0x1147)
+   is the documented fallback. Docs updated.
+3. **Neighbour IEEE bound** now uses `psNib->sTblSize.u16MacAddTableSize` (the
+   MAC address-table size that `u16Lookup` / `ZPS_u64NwkNibGetMappedIeeeAddr`
+   index) instead of the smaller, unrelated `u16AddrMap` (nwkAddressMap size),
+   so valid mapped IEEE addresses at lookup indices ≥ `u16AddrMap` are no longer
+   wrongly reported as NA. Verified against the SDK's own use in
+   `appZpsExtendedDebug.c`.
 
 Determinism is pinned by `scripts/build.sh` (`LC_ALL=C`, `TZ=UTC`,
 `SOURCE_DATE_EPOCH`). Both Blocker A and Blocker B are resolved; the validated
@@ -55,10 +76,14 @@ lowering documented capacities**. Findings:
 - The remaining GP RAM is the combined proxy/sink table
   `sGPDeviceInfo…asZgpsSinkProxyTable[GP_NUMBER_OF_PROXY_SINK_TABLE_ENTRIES=5]`
   and the generated GP security table / TX queue (`.zpscfg`
-  `GreenPowerSecurityTable Size="5"`, `GreenPowerTxQueue Size="5"`). These are
-  the **documented operational capacities** (5 proxied GPDs / 5 security
-  entries / 5 queued frames). Reducing them lowers documented capacity, which
-  the correction forbids.
+  `GreenPowerSecurityTable Size="5"`, `GreenPowerTxQueue Size="5"`). A closer
+  audit confirms **every** GP sizing macro is at its SDK default and is **not**
+  overridden anywhere in this tree: proxy/sink=5, duplicate-filter=5,
+  buffered-records=4, paired-endpoints=5, sink-group-list=2. None are inflated,
+  so there is no oversized allocation to trim. These are the documented
+  operational capacities (5 proxied GPDs / 5 security entries / 5 queued
+  frames); reducing them lowers documented capacity, which the correction
+  forbids.
 - The `a0beb6f` diff cannot be fetched (no network access) to reproduce a
   capacity-neutral reduction verbatim, and inventing table shrinks would breach
   the "do not silently lower documented capacities" constraint.
@@ -248,7 +273,12 @@ handler exists) in `custom_diag.{c,h}` with dispatch in `app_Znc_cmds.c` and
 the enum in `SerialLink.h`. Ops GET / SET / RESTORE_DEFAULT act on the single
 **global** Node Descriptor via public `ZPS_psGetLocalNodeDescriptor()` with
 mandatory readback (SET returns OK only when the re-read code equals the
-request); RESTORE targets `ZCL_MANUFACTURER_CODE` (0x1037). No PDM write. The
+request). RESTORE targets the **shipped Node-Descriptor default 0x1147**
+(`.zpscfg` `ManufacturerCode="4423"`), captured by snapshotting the live
+descriptor **once before any SET** (single source of truth), with the
+compile-time `DIAG_MANUF_CODE_SHIPPED_DEFAULT` (0x1147) only as a fallback. This
+is deliberately **not** `ZCL_MANUFACTURER_CODE` (0x1037), which is the ZCL
+attribute default and would restore the wrong value. No PDM write. The
 firmware makes no per-device scoping claim — the host serialises coordinator
 use via its lease (`zigbee/manufcode_lease.go`). Matches
 `docs/DIAGNOSTIC_ABI_MANUFACTURER_CODE.md` and the Go host ABI. Stock /
