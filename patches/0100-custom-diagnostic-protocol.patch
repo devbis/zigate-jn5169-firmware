@@ -1,0 +1,1807 @@
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Build/ZigbeeNodeControlBridge/Makefile b/ModuleRadio/Firmware/src/ZiGate/Build/ZigbeeNodeControlBridge/Makefile
+--- a/ModuleRadio/Firmware/src/ZiGate/Build/ZigbeeNodeControlBridge/Makefile
++++ b/ModuleRadio/Firmware/src/ZiGate/Build/ZigbeeNodeControlBridge/Makefile
+@@ -215,6 +215,8 @@
+ APPSRC += uart.c
+ APPSRC += pdum_apdu.S
+ APPSRC += app_ota_server.c
++APPSRC += tclk_diagnostic.c
++APPSRC += custom_diag.c
+ ifeq ($(JENNIC_CHIP_FAMILY),JN517x)
+ APPSRC += AHI_ModuleConfiguration.c
+ endif
+@@ -245,6 +247,12 @@
+ 
+ LIBNAME = $(TARGET)_PDM$(PDM_BUILD_TYPE)_BAUD_$(BAUD)_DEBUG_$(DEBUG)
+ 
++# Link-time interposition for read-only TCLK diagnostics. No library member is
++# modified and every wrapper returns the original value unchanged.
++LDFLAGS += -Wl,--wrap=zps_eAplApsmeConfirmKeyReqRsp
++LDFLAGS += -Wl,--wrap=ZPS_u16NwkNibFindNwkAddr
++LDFLAGS += -Wl,--wrap=zps_eAplSecEncryptPacket
++LDFLAGS += -Wl,--wrap=zps_vGenerateHashForVerifiedKey
+ 
+ 
+ ###############################################################################
+@@ -375,8 +383,6 @@
+ 	$(CC) -Wl,--gc-sections -Wl,-u_AppColdStart -Wl,-u_AppWarmStart $(LDFLAGS) -T$(ZNCLKCMD) -o $@ -Wl,--start-group $(APPOBJS) $(addprefix -l,$(LDLIBS))  -lm -Wl,--end-group -Wl,-Map,$(GENERATED_FILE_NAME).map
+ 
+ 	$(SIZE) $@
+-	date +%c >> $(APP_BASE)/Doc/size.txt
+-	$(SIZE) $@ >> $(APP_BASE)/Doc/size.txt
+ 
+ # Do a second linking with LTO disabled
+ 	$(CC) -Wl,--cref -Wl,--gc-sections -Wl,-u_AppColdStart -Wl,-u_AppWarmStart $(LDFLAGS) -T$(ZNCLKCMD) -L $(SDK_BASE_DIR)/Stack/ZCL/Build/  -o $@ -Wl,--start-group $(APPOBJS) $(addprefix -l,$(LDLIBS)) -lm -Wl,--end-group -fno-lto -Wl,-Map,$(GENERATED_FILE_NAME)_NOLTO.map
+@@ -405,4 +411,3 @@
+ 	rm -f $(APP_SRC_DIR)/pdum_gen.* $(APP_SRC_DIR)/zps_gen*.* $(APP_SRC_DIR)/pdum_apdu.*
+ 
+ ###############################################################################
+-
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/SerialLink.h b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/SerialLink.h
+--- a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/SerialLink.h
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/SerialLink.h
+@@ -100,6 +100,24 @@
+     E_SL_MSG_NODE_FACTORY_NEW_RESTART                          =   0x8007,
+     E_SL_MSG_GET_VERSION                                       =   0x0010,
+     E_SL_MSG_VERSION_LIST                                      =   0x8010,
++    E_SL_MSG_GET_TCLK_DIAGNOSTIC                               =   0x0D00,
++    E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE                          =   0x8D00,
++
++    /* Compact versioned read-only custom diagnostic extension.
++     * These IDs are locally unused in this source tree; hosts must negotiate
++     * protocol version/capabilities via 0x0D0F before relying on them. */
++    E_SL_MSG_CAPABILITY_REQ                                    =   0x0D0F,
++    E_SL_MSG_CAPABILITY_RSP                                    =   0x8D0F,
++    E_SL_MSG_GROUP_OP_REQ                                      =   0x0D12,
++    E_SL_MSG_GROUP_OP_RSP                                      =   0x8D12,
++    E_SL_MSG_GROUP_LIST_REQ                                    =   0x0D13,
++    E_SL_MSG_GROUP_LIST_RSP                                    =   0x8D13,
++    E_SL_MSG_LOCAL_NEIGHBOUR_REQ                               =   0x0D14,
++    E_SL_MSG_LOCAL_NEIGHBOUR_RSP                               =   0x8D14,
++    E_SL_MSG_LOCAL_ROUTE_REQ                                   =   0x0D15,
++    E_SL_MSG_LOCAL_ROUTE_RSP                                   =   0x8D15,
++    E_SL_MSG_GENERAL_DIAG_REQ                                  =   0x0D1F,
++    E_SL_MSG_GENERAL_DIAG_RSP                                  =   0x8D1F,
+ 
+     E_SL_MSG_NETWORK_STATE_REQ                                 =   0x0009,
+     E_SL_MSG_NETWORK_STATE_RSP                                 =   0x8009,
+@@ -437,4 +455,3 @@
+ /****************************************************************************/
+ /***        END OF FILE                                                   ***/
+ /****************************************************************************/
+-
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_Znc_cmds.c b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_Znc_cmds.c
+--- a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_Znc_cmds.c
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_Znc_cmds.c
+@@ -78,6 +78,8 @@
+ #include "PDM_IDs.h"
+ #include "ApplianceStatistics.h"
+ #include "bdb_DeviceCommissioning.h"
++#include "tclk_diagnostic.h"
++#include "custom_diag.h"
+ 
+ //FRED IASWD
+ #include "IASWD.h"
+@@ -102,6 +104,18 @@
+ #ifndef VERSION
+ #define VERSION    0x00030323
+ #endif
++
++/* Keep the deterministic diagnostic build id anchored to the real firmware
++ * version: fail the build if custom_diag.h drifts from the local VERSION. */
++typedef char diag_version_sync_assert[(DIAG_FW_VERSION == VERSION) ? 1 : -1];
++
++/* R8024 status byte emitted on an asynchronous network formation failure.
++ * Uses the stack's own NLME-NETWORK-FORMATION failure enumeration
++ * ZPS_NWK_ENUM_STARTUP_FAILURE (0xC4, from zps_nwk_sap.h). This is distinct
++ * from 1 (successful new formation), 4 (already on a network) and the BDB
++ * status space (BDB_E_ERROR_COMMISSIONING_IN_PROGRESS == 6), so it cannot be
++ * confused with any BDB enum value. */
++#define APP_R8024_STATUS_FORMATION_FAILURE   (ZPS_NWK_ENUM_STARTUP_FAILURE)
+ /****************************************************************************/
+ /***    Type Definitions                          ***/
+ /****************************************************************************/
+@@ -191,6 +205,7 @@
+ #endif
+ 
+ PRIVATE void APP_vControlNodeStartNetwork ( void );
++PRIVATE void APP_vSendAlreadyOnNetworkEvent ( uint8 *pu8Buffer );
+ 
+ 
+ PRIVATE ZPS_teStatus APP_eZdpMgmtLqiRequest ( uint16    u16Addr,
+@@ -365,26 +380,55 @@
+                                    0 );
+ 
+                 uint16 u16ResponseCode = E_SL_MSG_AHI_GET_TX_POWER_RSP;
+-                // In case of Set TX power use Get TX power to get current TX level
++                /*
++                 * The generic 0x8000 above already carries the status of the
++                 * requested command (set OR get). Only perform the readback and
++                 * emit the 0x8806/0x8807 value frame when the command actually
++                 * succeeded: for a SET, both the set AND the follow-up get must
++                 * succeed; a failed set must not emit a value frame and must
++                 * leave the generic 0x8000 reporting failure.
++                 */
++                uint8  u8CmdStatus = u8Status;   /* status of the requested command */
++                bool_t bEmitValue;
+                 if (u16PacketType == E_SL_MSG_AHI_SET_TX_POWER)
+                 {
+-                    u32AHIresponse = APP_vCMDHandleAHICommand(E_SL_MSG_AHI_GET_TX_POWER, 0, au8LinkRxBuffer, &u8Status);
+                     u16ResponseCode = E_SL_MSG_AHI_SET_TX_POWER_RSP;
++                    if (u8CmdStatus == E_AHI_SUCCESS)
++                    {
++                        uint8 u8GetStatus = E_AHI_PARSE_ERROR;
++                        u32AHIresponse = APP_vCMDHandleAHICommand(E_SL_MSG_AHI_GET_TX_POWER, 0, au8LinkRxBuffer, &u8GetStatus);
++                        bEmitValue = (u8GetStatus == E_AHI_SUCCESS);
++                    }
++                    else
++                    {
++                        bEmitValue = FALSE;
++                    }
++                }
++                else
++                {
++                    bEmitValue = (u8CmdStatus == E_AHI_SUCCESS);
+                 }
+                 // Only return value if command succeed.
+-                // TX power value range is 0x00-0xbf so uint8 is big enough
+-                if ( u8Status == E_AHI_SUCCESS)
++                // TX power value range is 0x00-0x40 (MiniMac) so uint8 is big enough
++                if ( bEmitValue )
+                 {
+-                    // Convert raw level to mapped value(-dBM) JN516X only not
+-                    uint8 u8TXlevelRaw = (0x3f & u32AHIresponse) & 0xFF;
++                    /*
++                     * Preserve the stock two-application-byte response SHAPE
++                     * (vSL_WriteMessage appends the LQI byte). Byte 0 is the
++                     * FULL PIB raw value (0x00..0x40) so 0x40 is echoed intact
++                     * and an exact raw restore/echo is possible; byte 1 is the
++                     * legacy mapped value computed from the masked 6-bit level.
++                     */
++                    uint8 u8TXrawFull   = (uint8)(u32AHIresponse & 0xFFU);
++                    uint8 u8TXlevelMask = u8TXrawFull & PHY_PIB_TX_POWER_MASK;
+                     uint8 u8TXlevel;
+-                    if (u8TXlevelRaw <= 31) { u8TXlevel = 0; }
+-                    else if (u8TXlevelRaw <= 39) { u8TXlevel = 32; }
+-                    else if (u8TXlevelRaw <= 51) { u8TXlevel = 20; }
+-                    else if (u8TXlevelRaw <= 63) { u8TXlevel = 9; }
++                    if (u8TXlevelMask <= 31) { u8TXlevel = 0; }
++                    else if (u8TXlevelMask <= 39) { u8TXlevel = 32; }
++                    else if (u8TXlevelMask <= 51) { u8TXlevel = 20; }
++                    else { u8TXlevel = 9; }   /* masked level is 6-bit: 52..63 */
+ 
+                     u8Length = 0;
+-                    ZNC_BUF_U8_UPD  ( &au8values[ 0 ], u8TXlevelRaw,   u8Length );
++                    ZNC_BUF_U8_UPD  ( &au8values[ 0 ], u8TXrawFull,    u8Length );
+                     ZNC_BUF_U8_UPD  ( &au8values[ 1 ], u8TXlevel,      u8Length );
+                     vSL_WriteMessage ( u16ResponseCode,
+                                        u8Length,
+@@ -450,8 +494,85 @@
+             }
+             break;
+ 
+-
+-            case (E_SL_MSG_SET_EXT_PANID):
++            case (E_SL_MSG_GET_TCLK_DIAGNOSTIC):
++            {
++                uint8 au8Diagnostic[sizeof(TCLKDIAG_tsState) + 1];
++
++                if (u16PacketLength != 0)
++                {
++                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
++                }
++                else if (!TCLKDIAG_bSnapshot(au8Diagnostic))
++                {
++                    u8Status = E_SL_MSG_STATUS_BUSY;
++                }
++
++                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8Status,      u8Length );
++                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8SeqNum,      u8Length );
++                ZNC_BUF_U16_UPD ( &au8values[ u8Length ], u16PacketType, u8Length );
++                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8RequestSent, u8Length );
++                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8SeqApsNum,   u8Length );
++                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], PDUM_u8GetNpduUse(), u8Length );
++                ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8GetApduUse(), u8Length );
++
++                vSL_WriteMessage(E_SL_MSG_STATUS,
++                                 u8Length,
++                                 au8values,
++                                 0);
++                if (u8Status == E_SL_MSG_STATUS_SUCCESS)
++                {
++                    vSL_WriteMessage(E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE,
++                                     sizeof(TCLKDIAG_tsState),
++                                     au8Diagnostic,
++                                     0);
++                }
++                return;
++            }
++            break;
++
++            case (E_SL_MSG_CAPABILITY_REQ):
++            {
++                CUSTOMDIAG_vHandleCapability(u16PacketLength, au8LinkRxBuffer);
++                return;
++            }
++            break;
++
++            case (E_SL_MSG_GENERAL_DIAG_REQ):
++            {
++                CUSTOMDIAG_vHandleGeneralDiag(u16PacketLength);
++                return;
++            }
++            break;
++
++            case (E_SL_MSG_LOCAL_NEIGHBOUR_REQ):
++            {
++                CUSTOMDIAG_vHandleNeighbours(u16PacketLength, au8LinkRxBuffer);
++                return;
++            }
++            break;
++
++            case (E_SL_MSG_LOCAL_ROUTE_REQ):
++            {
++                CUSTOMDIAG_vHandleRoutes(u16PacketLength, au8LinkRxBuffer);
++                return;
++            }
++            break;
++
++            case (E_SL_MSG_GROUP_OP_REQ):
++            {
++                CUSTOMDIAG_vHandleGroupOp(u16PacketLength, au8LinkRxBuffer);
++                return;
++            }
++            break;
++
++            case (E_SL_MSG_GROUP_LIST_REQ):
++            {
++                CUSTOMDIAG_vHandleGroupList(u16PacketLength, au8LinkRxBuffer);
++                return;
++            }
++            break;
++
++
+             {
+                 // If device type is 0(Coordinator) and network is already formed prevent changing EXT PANID
+                 // JN-UG-3113 v1.5 Chapter 5.1.1
+@@ -3636,6 +3757,21 @@
+ #endif
+         if( sZllState.u8DeviceType == ZPS_ZDO_DEVICE_COORD )
+         {
++            /*
++             * If the coordinator is already on a network, report the
++             * stock-compatible "already on network" R8024 (status 4) with a
++             * valid short address, IEEE address and channel BEFORE touching the
++             * Trust Center credential flash or initialising formation, and
++             * without the unconditional PDM record saves that the normal
++             * formed-event path performs. This makes StartNetwork a safe probe
++             * on an already-formed coordinator (BDB_E_ERROR_NODE_IS_ON_A_NWK).
++             */
++            if( sBDB.sAttrib.bbdbNodeIsOnANetwork )
++            {
++                APP_vSendAlreadyOnNetworkEvent(au8Buffer);
++                return;
++            }
++
+             ZPS_vTcInitFlash(&sSet, asTclkStruct);
+             ZPS_vTCSetCallback(APP_bSendHATransportKey);
+             if( psAib->u64ApsUseExtendedPanid == 0 )
+@@ -3652,7 +3788,9 @@
+             {
+                 if (BDB_E_ERROR_NODE_IS_ON_A_NWK == u8Status)
+                 {
+-                    APP_vSendJoinedFormEventToHost(BDB_E_ERROR_NODE_IS_ON_A_NWK, au8Buffer);
++                    /* Fallback: BDB rejected formation because the node is on a
++                     * network. Emit the same stock status-4 event without saves. */
++                    APP_vSendAlreadyOnNetworkEvent(au8Buffer);
+                 }
+                 else
+                 {
+@@ -3841,9 +3979,14 @@
+ {
+     bool_t          bStatus     =  TRUE;
+     ZPS_teStatus    eStatus;
+-    uint16          u16Location;
+-    AESSW_Block_u   uKey;
++    uint16          u16Location = TCLK_DIAGNOSTIC_U16_NA;
+     bool_t          bCredPresent =  FALSE;
++
++    TCLKDIAG_vCallbackBegin(u16ShortAddress,
++                            u64DeviceAddress,
++                            u8Status,
++                            u16Mac,
++                            bSetTclkFlashFeature);
+ 
+     if( bBlackListEnable )
+     {
+@@ -3893,18 +4036,26 @@
+ 		uint8 au8Key[16] = { 0x5a, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41,
+ 								  0x6c, 0x6c, 0x69, 0x61, 0x6e, 0x63, 0x65, 0x30, 0x39 };
+ 
+-		ZPS_eAplZdoAddReplaceLinkKey( u64DeviceAddress, au8Key,   ZPS_APS_UNIQUE_LINK_KEY);
++        TCLKDIAG_vInsertionAttempted();
++		eStatus = ZPS_eAplZdoAddReplaceLinkKey( u64DeviceAddress,
++                                               au8Key,
++                                               ZPS_APS_UNIQUE_LINK_KEY);
++        ZPS_u8GrabMutexLock ( zps_vGetZpsMutex , &sZpsIntStore );
++        bCredPresent = zps_bGetFlashCredential(u64DeviceAddress,
++                                               NULL,
++                                               &u16Location,
++                                               FALSE,
++                                               FALSE);
++        TCLKDIAG_vInsertionResult(eStatus, bCredPresent, u16Location);
+ 		/*If credential is present roll back to confirm that key is used and not install code */
+ 		/*if(bCredPresent)
+ 		{
+ 			asTclkStruct[u16Location].u16TclkRetries = 0xFFFF;
+ 		}*/
+-
+-
+-        ZPS_u8GrabMutexLock ( zps_vGetZpsMutex , &sZpsIntStore );
+         bStatus = TRUE;
+     }
+ 
++    TCLKDIAG_vCallbackEnd(bStatus);
+     return bStatus;
+ }
+ 
+@@ -3967,6 +4118,81 @@
+ #endif
+     }
+ 
++}
++
++
++/****************************************************************************
++ *
++ * NAME: APP_vSendAlreadyOnNetworkEvent
++ *
++ * DESCRIPTION:
++ *   Emit the stock-compatible R8024 (E_SL_MSG_NETWORK_JOINED_FORMED) with
++ *   status BDB_E_ERROR_NODE_IS_ON_A_NWK (4) and a valid short address, IEEE
++ *   address and channel, using the exact 12-byte wire layout produced by
++ *   APP_vSendJoinedFormEventToHost() for the status-4 case. Unlike that
++ *   function this path performs NO PDM/ZPS record saves and does not toggle
++ *   LED/OTA state, so querying an already-formed coordinator has no side
++ *   effect on persisted network identity.
++ *
++ ****************************************************************************/
++PRIVATE void APP_vSendAlreadyOnNetworkEvent ( uint8 *pu8Buffer )
++{
++    uint32  u32Channel = 0;
++    uint16  u16NwkAddr;
++    uint64  u64IeeeAddr;
++    uint8   u8Length = 0;
++
++    u16NwkAddr  =  ZPS_u16NwkNibGetNwkAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
++    u64IeeeAddr =  ZPS_u64NwkNibGetExtAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
++    eAppApiPlmeGet ( PHY_PIB_ATTR_CURRENT_CHANNEL, &u32Channel );
++
++    pu8Buffer[0] = BDB_E_ERROR_NODE_IS_ON_A_NWK;
++    ZNC_BUF_U8_UPD  ( &pu8Buffer[ 1 ],        BDB_E_ERROR_NODE_IS_ON_A_NWK, u8Length );
++    ZNC_BUF_U16_UPD ( &pu8Buffer[ u8Length ], u16NwkAddr,                   u8Length );
++    ZNC_BUF_U64_UPD ( &pu8Buffer[ u8Length ], u64IeeeAddr,                  u8Length );
++    ZNC_BUF_U8_UPD  ( &pu8Buffer[ u8Length ], (uint8)u32Channel,            u8Length );
++
++    vSL_WriteMessage ( E_SL_MSG_NETWORK_JOINED_FORMED,
++                       ( sizeof(uint8) + sizeof(uint16) + sizeof(uint64) + sizeof(uint8) ),
++                       pu8Buffer,
++                       0 );
++}
++
++
++/****************************************************************************
++ *
++ * NAME: APP_vSendFormationFailedEventToHost
++ *
++ * DESCRIPTION:
++ *   Emit a definite failure R8024 (E_SL_MSG_NETWORK_JOINED_FORMED) when an
++ *   asynchronous BDB_EVENT_NWK_FORMATION_FAILURE occurs, so the host is not
++ *   left waiting for the formed event until timeout. Uses the same 12-byte
++ *   wire layout with a distinct failure status (not 1 success, not 4 already-
++ *   on-network) and performs no PDM/ZPS saves.
++ *
++ ****************************************************************************/
++PUBLIC void APP_vSendFormationFailedEventToHost ( void )
++{
++    uint8   au8Buffer[14];
++    uint32  u32Channel = 0;
++    uint16  u16NwkAddr;
++    uint64  u64IeeeAddr;
++    uint8   u8Length = 0;
++
++    u16NwkAddr  =  ZPS_u16NwkNibGetNwkAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
++    u64IeeeAddr =  ZPS_u64NwkNibGetExtAddr ( ZPS_pvAplZdoGetNwkHandle ( ) );
++    eAppApiPlmeGet ( PHY_PIB_ATTR_CURRENT_CHANNEL, &u32Channel );
++
++    au8Buffer[0] = APP_R8024_STATUS_FORMATION_FAILURE;
++    ZNC_BUF_U8_UPD  ( &au8Buffer[ 1 ],        APP_R8024_STATUS_FORMATION_FAILURE, u8Length );
++    ZNC_BUF_U16_UPD ( &au8Buffer[ u8Length ], u16NwkAddr,                         u8Length );
++    ZNC_BUF_U64_UPD ( &au8Buffer[ u8Length ], u64IeeeAddr,                        u8Length );
++    ZNC_BUF_U8_UPD  ( &au8Buffer[ u8Length ], (uint8)u32Channel,                  u8Length );
++
++    vSL_WriteMessage ( E_SL_MSG_NETWORK_JOINED_FORMED,
++                       ( sizeof(uint8) + sizeof(uint16) + sizeof(uint64) + sizeof(uint8) ),
++                       au8Buffer,
++                       0 );
+ }
+ 
+ 
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_zcl_event_handler.c b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_zcl_event_handler.c
+--- a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_zcl_event_handler.c
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_zcl_event_handler.c
+@@ -1784,6 +1784,12 @@
+             break;
+ 
+         case BDB_EVENT_NWK_FORMATION_FAILURE:
++            /* Emit a definite failure R8024 so the host is not left waiting
++             * for the formed event until timeout. Declared in app_Znc_cmds.c. */
++            {
++                extern void APP_vSendFormationFailedEventToHost ( void );
++                APP_vSendFormationFailedEventToHost();
++            }
+             break;
+ 
+         default:
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_ahi_commands.c b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_ahi_commands.c
+--- a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_ahi_commands.c
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/app_ahi_commands.c
+@@ -250,9 +250,22 @@
+         u8TxPower = pu8LinkRxBuffer[ u32BytesRead ];
+         u32BytesRead += sizeof(u8TxPower);
+ 
+-        if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS)
+-        {
+-            *peAHIStatus = E_AHI_SUCCESS;
++        /*
++         * Validate against the supported PHY encoding using the SDK macro. The
++         * selected MiniMac shim defines PHY_PIB_TX_POWER_MAX = 0x40 (the 3 dB
++         * tolerance code IS a valid setting), so 0x40 must NOT be rejected. The
++         * authoritative acceptance is the eAppApiPlmeSet result; the range
++         * check simply rejects clearly out-of-range codes before the PIB write.
++         * On rejection the outer dispatch still emits the stock
++         * E_SL_MSG_STATUS frame and omits the value frame, so the existing
++         * wire response shape is unchanged.
++         */
++        if (u8TxPower <= PHY_PIB_TX_POWER_MAX)
++        {
++            if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS)
++            {
++                *peAHIStatus = E_AHI_SUCCESS;
++            }
+         }
+     }
+ }
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/tclk_diagnostic.h b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/tclk_diagnostic.h
+new file mode 100644
+--- /dev/null
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/tclk_diagnostic.h
+@@ -0,0 +1,79 @@
++#ifndef TCLK_DIAGNOSTIC_H_
++#define TCLK_DIAGNOSTIC_H_
++
++#include <stddef.h>
++#include "jendefs.h"
++#include "zps_apl.h"
++
++#define TCLK_DIAGNOSTIC_MAGIC   (0x54434c4bUL) /* "TCLK" */
++#define TCLK_DIAGNOSTIC_VERSION (0x0002U)
++#define TCLK_DIAGNOSTIC_U8_NA   (0xffU)
++#define TCLK_DIAGNOSTIC_U16_NA  (0xffffU)
++#define TCLK_DIAGNOSTIC_U32_NA  (0xffffffffUL)
++
++/*
++ * Volatile, RAM-only state intended for JTAG reads. No key bytes are retained.
++ * Sequence values are odd while a record is being updated and even when stable.
++ */
++typedef struct
++{
++    uint32 u32Magic;                    /* 0x00 */
++    uint16 u16Version;                  /* 0x04 */
++    uint16 u16Size;                     /* 0x06 */
++    uint64 u64CallbackDeviceIeee;       /* 0x08 */
++    uint32 u32CallbackSequence;         /* 0x10 */
++    uint16 u16CallbackShortAddress;     /* 0x14 */
++    uint16 u16CallbackMacId;            /* 0x16 */
++    uint8  u8CallbackStatus;            /* 0x18 */
++    uint8  u8FlashFeature;              /* 0x19 */
++    uint8  u8InsertionAttempted;        /* 0x1a */
++    uint8  u8AddReplaceStatus;          /* 0x1b */
++    uint8  u8CredentialPresent;         /* 0x1c */
++    uint8  u8CallbackReturn;            /* 0x1d */
++    uint16 u16CredentialIndex;          /* 0x1e */
++
++    uint64 u64ConfirmDeviceIeee;        /* 0x20 */
++    uint32 u32ConfirmSequence;          /* 0x28 */
++    uint16 u16NwkLookupFirst;           /* 0x2c */
++    uint16 u16NwkLookupSecond;          /* 0x2e */
++    uint32 u32VerifyValidationSequence; /* 0x30 */
++    uint8  u8ConfirmInputStatus;        /* 0x34 */
++    uint8  u8ConfirmKeyType;            /* 0x35 */
++    uint8  u8NwkLookupCount;            /* 0x36 */
++    uint8  u8EncryptionObserved;        /* 0x37 */
++    uint8  u8EncryptionReturnStatus;    /* 0x38 */
++    uint8  u8EncryptionSecured;         /* 0x39 */
++    uint8  u8ConfirmReturnStatus;       /* 0x3a */
++    uint8  u8SendReturnStatusEquivalent; /* 0x3b */
++    uint32 u32VerifyValidationAtConfirm; /* 0x3c */
++} TCLKDIAG_tsState;
++
++/* Fail at compile time if this BA2 ABI layout changes. */
++#define TCLKDIAG_OFFSET_ASSERT(member, offset) \
++    typedef char tclkdiag_offset_##member[(offsetof(TCLKDIAG_tsState, member) == (offset)) ? 1 : -1]
++TCLKDIAG_OFFSET_ASSERT(u32Magic, 0x00);
++TCLKDIAG_OFFSET_ASSERT(u64CallbackDeviceIeee, 0x08);
++TCLKDIAG_OFFSET_ASSERT(u32CallbackSequence, 0x10);
++TCLKDIAG_OFFSET_ASSERT(u16CredentialIndex, 0x1e);
++TCLKDIAG_OFFSET_ASSERT(u64ConfirmDeviceIeee, 0x20);
++TCLKDIAG_OFFSET_ASSERT(u32ConfirmSequence, 0x28);
++TCLKDIAG_OFFSET_ASSERT(u32VerifyValidationSequence, 0x30);
++TCLKDIAG_OFFSET_ASSERT(u8SendReturnStatusEquivalent, 0x3b);
++TCLKDIAG_OFFSET_ASSERT(u32VerifyValidationAtConfirm, 0x3c);
++typedef char tclkdiag_size_assert[(sizeof(TCLKDIAG_tsState) == 0x40) ? 1 : -1];
++
++PUBLIC extern volatile TCLKDIAG_tsState g_sTclkDiagnostic;
++
++PUBLIC bool_t TCLKDIAG_bSnapshot(uint8 *pu8Buffer);
++PUBLIC void TCLKDIAG_vCallbackBegin(uint16 u16ShortAddress,
++                                    uint64 u64DeviceAddress,
++                                    uint8 u8Status,
++                                    uint16 u16MacId,
++                                    bool_t bFlashFeature);
++PUBLIC void TCLKDIAG_vInsertionAttempted(void);
++PUBLIC void TCLKDIAG_vInsertionResult(ZPS_teStatus eAddReplaceStatus,
++                                     bool_t bCredentialPresent,
++                                     uint16 u16CredentialIndex);
++PUBLIC void TCLKDIAG_vCallbackEnd(bool_t bCallbackReturn);
++
++#endif /* TCLK_DIAGNOSTIC_H_ */
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/tclk_diagnostic.c b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/tclk_diagnostic.c
+new file mode 100644
+--- /dev/null
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/tclk_diagnostic.c
+@@ -0,0 +1,260 @@
++#include "tclk_diagnostic.h"
++
++#include "zps_apl_af.h"
++#include "zps_apl_aib.h"
++#include "zps_nwk_nib.h"
++
++PUBLIC volatile TCLKDIAG_tsState g_sTclkDiagnostic
++    __attribute__((used, aligned(4))) =
++{
++    .u32Magic = TCLK_DIAGNOSTIC_MAGIC,
++    .u16Version = TCLK_DIAGNOSTIC_VERSION,
++    .u16Size = sizeof(TCLKDIAG_tsState),
++    .u8AddReplaceStatus = TCLK_DIAGNOSTIC_U8_NA,
++    .u16CredentialIndex = TCLK_DIAGNOSTIC_U16_NA,
++    .u16NwkLookupFirst = TCLK_DIAGNOSTIC_U16_NA,
++    .u16NwkLookupSecond = TCLK_DIAGNOSTIC_U16_NA,
++    .u8EncryptionReturnStatus = TCLK_DIAGNOSTIC_U8_NA,
++    .u8EncryptionSecured = TCLK_DIAGNOSTIC_U8_NA,
++    .u8ConfirmReturnStatus = TCLK_DIAGNOSTIC_U8_NA,
++    .u8SendReturnStatusEquivalent = TCLK_DIAGNOSTIC_U8_NA,
++    .u32VerifyValidationAtConfirm = TCLK_DIAGNOSTIC_U32_NA
++};
++
++PRIVATE volatile bool_t bConfirmInProgress = FALSE;
++
++PUBLIC bool_t TCLKDIAG_bSnapshot(uint8 *pu8Buffer)
++{
++    const volatile uint8 *pu8Source =
++        (const volatile uint8 *)&g_sTclkDiagnostic;
++    uint32 u32CallbackBefore;
++    uint32 u32CallbackAfter;
++    uint32 u32ConfirmBefore;
++    uint32 u32ConfirmAfter;
++    uint32 u32ValidationBefore;
++    uint32 u32ValidationAfter;
++    uint8 u8Attempt;
++    uint8 u8Index;
++
++    if (pu8Buffer == NULL)
++    {
++        return FALSE;
++    }
++
++    for (u8Attempt = 0; u8Attempt < 3; u8Attempt++)
++    {
++        u32CallbackBefore = g_sTclkDiagnostic.u32CallbackSequence;
++        u32ConfirmBefore = g_sTclkDiagnostic.u32ConfirmSequence;
++        u32ValidationBefore =
++            g_sTclkDiagnostic.u32VerifyValidationSequence;
++        if ((u32CallbackBefore & 1U) != 0 ||
++            (u32ConfirmBefore & 1U) != 0 ||
++            (u32ValidationBefore & 1U) != 0)
++        {
++            continue;
++        }
++
++        for (u8Index = 0; u8Index < sizeof(TCLKDIAG_tsState); u8Index++)
++        {
++            pu8Buffer[u8Index] = pu8Source[u8Index];
++        }
++
++        u32CallbackAfter = g_sTclkDiagnostic.u32CallbackSequence;
++        u32ConfirmAfter = g_sTclkDiagnostic.u32ConfirmSequence;
++        u32ValidationAfter =
++            g_sTclkDiagnostic.u32VerifyValidationSequence;
++        if (u32CallbackBefore == u32CallbackAfter &&
++            u32ConfirmBefore == u32ConfirmAfter &&
++            u32ValidationBefore == u32ValidationAfter &&
++            (u32CallbackAfter & 1U) == 0 &&
++            (u32ConfirmAfter & 1U) == 0 &&
++            (u32ValidationAfter & 1U) == 0)
++        {
++            return TRUE;
++        }
++    }
++
++    return FALSE;
++}
++
++PUBLIC void TCLKDIAG_vCallbackBegin(uint16 u16ShortAddress,
++                                    uint64 u64DeviceAddress,
++                                    uint8 u8Status,
++                                    uint16 u16MacId,
++                                    bool_t bFlashFeature)
++{
++    g_sTclkDiagnostic.u32CallbackSequence++;
++    g_sTclkDiagnostic.u64CallbackDeviceIeee = u64DeviceAddress;
++    g_sTclkDiagnostic.u16CallbackShortAddress = u16ShortAddress;
++    g_sTclkDiagnostic.u16CallbackMacId = u16MacId;
++    g_sTclkDiagnostic.u8CallbackStatus = u8Status;
++    g_sTclkDiagnostic.u8FlashFeature = bFlashFeature;
++    g_sTclkDiagnostic.u8InsertionAttempted = FALSE;
++    g_sTclkDiagnostic.u8AddReplaceStatus = TCLK_DIAGNOSTIC_U8_NA;
++    g_sTclkDiagnostic.u8CredentialPresent = FALSE;
++    g_sTclkDiagnostic.u8CallbackReturn = TCLK_DIAGNOSTIC_U8_NA;
++    g_sTclkDiagnostic.u16CredentialIndex = TCLK_DIAGNOSTIC_U16_NA;
++}
++
++PUBLIC void TCLKDIAG_vInsertionAttempted(void)
++{
++    g_sTclkDiagnostic.u8InsertionAttempted = TRUE;
++}
++
++PUBLIC void TCLKDIAG_vInsertionResult(ZPS_teStatus eAddReplaceStatus,
++                                     bool_t bCredentialPresent,
++                                     uint16 u16CredentialIndex)
++{
++    g_sTclkDiagnostic.u8AddReplaceStatus = eAddReplaceStatus;
++    g_sTclkDiagnostic.u8CredentialPresent = bCredentialPresent;
++    g_sTclkDiagnostic.u16CredentialIndex =
++        bCredentialPresent ? u16CredentialIndex : TCLK_DIAGNOSTIC_U16_NA;
++}
++
++PUBLIC void TCLKDIAG_vCallbackEnd(bool_t bCallbackReturn)
++{
++    g_sTclkDiagnostic.u8CallbackReturn = bCallbackReturn;
++    g_sTclkDiagnostic.u32CallbackSequence++;
++}
++
++/*
++ * These wrappers are linker-supported interposition only. They return every
++ * original value unchanged and are active solely while Confirm-Key executes.
++ */
++extern ZPS_teStatus __real_zps_eAplApsmeConfirmKeyReqRsp(void *pvApl,
++                                                         uint8 u8Status,
++                                                         uint64 u64DstAddr,
++                                                         uint8 u8KeyType);
++
++PUBLIC ZPS_teStatus __wrap_zps_eAplApsmeConfirmKeyReqRsp(void *pvApl,
++                                                         uint8 u8Status,
++                                                         uint64 u64DstAddr,
++                                                         uint8 u8KeyType)
++{
++    ZPS_teStatus eStatus;
++
++    g_sTclkDiagnostic.u32ConfirmSequence++;
++    g_sTclkDiagnostic.u64ConfirmDeviceIeee = u64DstAddr;
++    g_sTclkDiagnostic.u16NwkLookupFirst = TCLK_DIAGNOSTIC_U16_NA;
++    g_sTclkDiagnostic.u16NwkLookupSecond = TCLK_DIAGNOSTIC_U16_NA;
++    g_sTclkDiagnostic.u32VerifyValidationAtConfirm =
++        g_sTclkDiagnostic.u32VerifyValidationSequence;
++    g_sTclkDiagnostic.u8ConfirmInputStatus = u8Status;
++    g_sTclkDiagnostic.u8ConfirmKeyType = u8KeyType;
++    g_sTclkDiagnostic.u8NwkLookupCount = 0;
++    g_sTclkDiagnostic.u8EncryptionObserved = FALSE;
++    g_sTclkDiagnostic.u8EncryptionReturnStatus = TCLK_DIAGNOSTIC_U8_NA;
++    g_sTclkDiagnostic.u8EncryptionSecured = TCLK_DIAGNOSTIC_U8_NA;
++    g_sTclkDiagnostic.u8ConfirmReturnStatus = TCLK_DIAGNOSTIC_U8_NA;
++    g_sTclkDiagnostic.u8SendReturnStatusEquivalent = TCLK_DIAGNOSTIC_U8_NA;
++
++    bConfirmInProgress = TRUE;
++    eStatus = __real_zps_eAplApsmeConfirmKeyReqRsp(pvApl,
++                                                   u8Status,
++                                                   u64DstAddr,
++                                                   u8KeyType);
++    bConfirmInProgress = FALSE;
++
++    g_sTclkDiagnostic.u8ConfirmReturnStatus = eStatus;
++    /*
++     * Exact-library disassembly proves Confirm-Key returns SendApsmeCmdFrame's
++     * return unchanged whenever Send is entered. The IEEE->NWK lookup is the
++     * first observable operation unique to that internal Send path.
++     */
++    if (g_sTclkDiagnostic.u8NwkLookupCount != 0)
++    {
++        g_sTclkDiagnostic.u8SendReturnStatusEquivalent = eStatus;
++    }
++    g_sTclkDiagnostic.u32ConfirmSequence++;
++    return eStatus;
++}
++
++/*
++ * Exact-library DWARF gives this four-argument ABI. Only an odd/even sequence
++ * is retained; no input, output hash, key bytes, or addresses are recorded.
++ */
++extern void __real_zps_vGenerateHashForVerifiedKey(void *pvApl,
++                                                   void *pvInput,
++                                                   uint8 u8KeyType,
++                                                   void *pvOutput);
++
++PUBLIC void __wrap_zps_vGenerateHashForVerifiedKey(void *pvApl,
++                                                   void *pvInput,
++                                                   uint8 u8KeyType,
++                                                   void *pvOutput)
++{
++    g_sTclkDiagnostic.u32VerifyValidationSequence++;
++    __real_zps_vGenerateHashForVerifiedKey(pvApl,
++                                           pvInput,
++                                           u8KeyType,
++                                           pvOutput);
++    g_sTclkDiagnostic.u32VerifyValidationSequence++;
++}
++
++extern uint16 __real_ZPS_u16NwkNibFindNwkAddr(void *pvNwk,
++                                              uint64 u64ExtAddr);
++
++PUBLIC uint16 __wrap_ZPS_u16NwkNibFindNwkAddr(void *pvNwk,
++                                              uint64 u64ExtAddr)
++{
++    uint16 u16Address = __real_ZPS_u16NwkNibFindNwkAddr(pvNwk, u64ExtAddr);
++
++    if (bConfirmInProgress)
++    {
++        if (g_sTclkDiagnostic.u8NwkLookupCount == 0)
++        {
++            g_sTclkDiagnostic.u16NwkLookupFirst = u16Address;
++        }
++        else if (g_sTclkDiagnostic.u8NwkLookupCount == 1)
++        {
++            g_sTclkDiagnostic.u16NwkLookupSecond = u16Address;
++        }
++        if (g_sTclkDiagnostic.u8NwkLookupCount != TCLK_DIAGNOSTIC_U8_NA)
++        {
++            g_sTclkDiagnostic.u8NwkLookupCount++;
++        }
++    }
++    return u16Address;
++}
++
++/*
++ * DWARF in the exact library gives this six-argument ABI. Interposing the
++ * encryption entry point is safe because zps_apl_apsme.o references it as an
++ * undefined symbol. The descriptor lookup itself is defined and called inside
++ * zps_apl_sec.o, so GNU ld --wrap cannot intercept that one internal call.
++ */
++extern ZPS_teStatus __real_zps_eAplSecEncryptPacket(void *pvApl,
++                                                    void *pvNPdu,
++                                                    uint16 u16NwkDstAddr,
++                                                    uint8 u8KeyId,
++                                                    bool_t bExtNonce,
++                                                    bool_t *pbSecured);
++
++PUBLIC ZPS_teStatus __wrap_zps_eAplSecEncryptPacket(void *pvApl,
++                                                    void *pvNPdu,
++                                                    uint16 u16NwkDstAddr,
++                                                    uint8 u8KeyId,
++                                                    bool_t bExtNonce,
++                                                    bool_t *pbSecured)
++{
++    bool_t bCapture = bConfirmInProgress;
++    ZPS_teStatus eStatus;
++
++    if (bCapture)
++    {
++        g_sTclkDiagnostic.u8EncryptionObserved = TRUE;
++    }
++    eStatus = __real_zps_eAplSecEncryptPacket(pvApl,
++                                              pvNPdu,
++                                              u16NwkDstAddr,
++                                              u8KeyId,
++                                              bExtNonce,
++                                              pbSecured);
++    if (bCapture)
++    {
++        g_sTclkDiagnostic.u8EncryptionReturnStatus = eStatus;
++        g_sTclkDiagnostic.u8EncryptionSecured =
++            (pbSecured != NULL) ? *pbSecured : TCLK_DIAGNOSTIC_U8_NA;
++    }
++    return eStatus;
++}
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/custom_diag.h b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/custom_diag.h
+new file mode 100644
+--- /dev/null
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/custom_diag.h
+@@ -0,0 +1,232 @@
++/****************************************************************************
++ *
++ * MODULE:  custom_diag.h
++ *
++ * DESCRIPTION:
++ *   Compact, versioned, read-only UART diagnostic extension for the ZiGate
++ *   JN5169 ZigbeeNodeControlBridge coordinator firmware.
++ *
++ *   This module is strictly additive. It does not modify, replace or expand
++ *   any stock SerialLink command, and it never exposes key material, allows
++ *   mutation of network identity, or performs raw PDM / credential-flash
++ *   access. Only the following capabilities are implemented and advertised:
++ *
++ *     - Capability negotiation           (0x0D0F / 0x8D0F)
++ *     - General read-only diagnostics    (0x0D1F / 0x8D1F)
++ *     - Paginated local neighbour table  (0x0D14 / 0x8D14)
++ *     - Paginated local route table      (0x0D15 / 0x8D15)
++ *     - Local APS group operation        (0x0D12 / 0x8D12)
++ *     - Local APS group paginated list   (0x0D13 / 0x8D13)
++ *
++ *   All wire fields are serialised individually in big-endian order using the
++ *   ZNC_BUF_* macros. No C structure is ever cast onto the wire, so the wire
++ *   ABI is independent of BA GCC 4.7.4 struct layout.
++ *
++ *   IMPORTANT: vSL_WriteMessage() always appends one link-quality byte to the
++ *   caller supplied buffer beyond the declared payload length. Every response
++ *   buffer therefore reserves one extra writable byte (DIAG_TX_LQI_RESERVE).
++ *
++ ****************************************************************************/
++
++#ifndef CUSTOM_DIAG_H_
++#define CUSTOM_DIAG_H_
++
++#include <jendefs.h>
++
++/****************************************************************************/
++/***        Protocol / capability constants                               ***/
++/****************************************************************************/
++
++/* Custom diagnostic protocol version (independent of the stock firmware
++ * version). Bump the minor for backward-compatible field additions and the
++ * major for incompatible wire changes.
++ *
++ * 1.1 revises paginated responses (7-byte prefix with an explicit next_index
++ * cursor) and adds a physical table index to each group-list row, so it is not
++ * wire-compatible with the never-released 1.0 draft. */
++#define DIAG_PROTO_MAJOR                (1U)
++#define DIAG_PROTO_MINOR                (1U)
++
++/* Explicit deterministic build revision. MUST be incremented whenever the
++ * implementation changes in a way that should be observable through the
++ * capability build id, even if version/protocol/capabilities are unchanged.
++ *   rev 1: initial custom protocol.
++ *   rev 2: NXP review fixes (TX power PIB handling, 0x8806 gating, 0xC4
++ *          formation-failure status, group pagination index + next cursor,
++ *          neighbour IEEE guard, endpoint-state validation, TCLK snapshot,
++ *          reserved-flag rejection).
++ *   rev 3: HIL fix - stock 0x8806/0x8807 first application byte is now the full
++ *          PIB raw value (0x00..0x40) instead of the 6-bit masked level, so a
++ *          valid raw of 0x40 is echoed intact; the second byte remains the
++ *          legacy mapped value from the masked level. Custom general-diag TX
++ *          fields (full raw / masked level / signed code) already matched. */
++#define DIAG_BUILD_REVISION             (3U)
++
++/* Per-request structure version accepted by every request handler. */
++#define DIAG_REQ_VERSION                (1U)
++/* Per-response structure version emitted by every response handler. */
++#define DIAG_RSP_VERSION                (1U)
++
++/* Stock firmware version this extension was compiled against. A compile-time
++ * assertion in app_Znc_cmds.c checks this equals the local VERSION macro so
++ * the deterministic build id below cannot silently drift. */
++#define DIAG_FW_VERSION                 (0x00030323UL)
++
++/* Capability bitmap. Advertise ONLY implemented, read-only-or-local
++ * capabilities. No security, key, PDM-dump/restore or mutation bits exist. */
++#define DIAG_CAP_BIT_GROUPS             (((uint64)1U) <<  0)
++#define DIAG_CAP_BIT_NEIGHBOURS         (((uint64)1U) <<  1)
++#define DIAG_CAP_BIT_ROUTES             (((uint64)1U) <<  2)
++#define DIAG_CAP_BIT_TXPOWER            (((uint64)1U) <<  9)
++#define DIAG_CAP_BIT_DIAGNOSTICS        (((uint64)1U) << 14)
++
++#define DIAG_CAP_BITMAP                 ( DIAG_CAP_BIT_GROUPS      \
++                                        | DIAG_CAP_BIT_NEIGHBOURS  \
++                                        | DIAG_CAP_BIT_ROUTES      \
++                                        | DIAG_CAP_BIT_TXPOWER     \
++                                        | DIAG_CAP_BIT_DIAGNOSTICS )
++
++/* 32-bit fold of the 64-bit capability bitmap. */
++#define DIAG_CAP_FOLD32 \
++    ((uint32)(DIAG_CAP_BITMAP & 0xFFFFFFFFUL) ^ \
++     (uint32)((DIAG_CAP_BITMAP >> 32) & 0xFFFFFFFFUL))
++
++/* Deterministic 32-bit firmware build id. Purely a compile-time constant, so
++ * two clean builds of identical sources produce identical ids, but any change
++ * to firmware version, protocol version, advertised capability set OR the
++ * explicit build revision changes it. Contains no runtime, address or key
++ * derived data. Layout: VERSION xor (proto_major<<24 | proto_minor<<16 |
++ * build_revision) xor folded-capability-bitmap. */
++#define DIAG_FW_BUILD_ID \
++    ((uint32)(DIAG_FW_VERSION \
++              ^ (((uint32)DIAG_PROTO_MAJOR << 24) \
++                 | ((uint32)DIAG_PROTO_MINOR << 16) \
++                 | ((uint32)DIAG_BUILD_REVISION & 0xFFFFU)) \
++              ^ DIAG_CAP_FOLD32))
++
++/****************************************************************************/
++/***        Buffer sizing                                                 ***/
++/****************************************************************************/
++
++/* Maximum application payload (excluding the appended LQI byte) that any
++ * custom response will emit. Advertised to hosts as the max unescaped
++ * application payload. Chosen to sit comfortably below MAX_PACKET_SIZE (270)
++ * once ZiGate framing/escaping overhead is accounted for. */
++#define DIAG_TX_PAYLOAD_MAX             (200U)
++
++/* vSL_WriteMessage() appends exactly one LQI byte past the payload. */
++#define DIAG_TX_LQI_RESERVE             (1U)
++
++#define DIAG_TX_BUFFER_SIZE             (DIAG_TX_PAYLOAD_MAX + DIAG_TX_LQI_RESERVE)
++
++/****************************************************************************/
++/***        Fixed request / response wire lengths                         ***/
++/****************************************************************************/
++
++/* Capability negotiation. */
++#define DIAG_CAP_MAGIC_0                (0x5AU)  /* 'Z' */
++#define DIAG_CAP_MAGIC_1                (0x47U)  /* 'G' */
++#define DIAG_CAP_MAGIC_2                (0x48U)  /* 'H' */
++#define DIAG_CAP_MAGIC_3                (0x58U)  /* 'X' */
++/* magic[4] host_major[1] host_minor[1] nonce[4] */
++#define DIAG_CAP_REQ_LEN                (10U)
++/* magic[4] nonce[4] proto_major[1] proto_minor[1] build_id[4] cap[8] maxpl[2] */
++#define DIAG_CAP_RSP_LEN                (24U)
++
++/* Common paginated response prefix:
++ *   version[1] status[1] flags[1] start_index[1] total[1] returned[1]
++ *   next_index[1]
++ * next_index is the physical table index at which the host should resume the
++ * next request. It equals the index one past the last slot scanned; when the
++ * scan reached the end of the table it equals total (capped at 0xFF), so the
++ * host terminates when next_index >= total. This makes pagination unambiguous
++ * across unused/holed table slots. */
++#define DIAG_PAGE_PREFIX_LEN            (7U)
++
++/* Neighbour table. */
++#define DIAG_NEIGHBOUR_REQ_LEN          (4U)   /* version start max flags */
++#define DIAG_NEIGHBOUR_RECORD_LEN       (23U)
++#define DIAG_NEIGHBOUR_MAX_RECORDS      (8U)
++#define DIAG_NEIGHBOUR_FLAG_INCLUDE_UNUSED  (0x01U)
++#define DIAG_NEIGHBOUR_FLAG_MASK        (0x01U)  /* only bit0 is defined */
++
++/* Route table. */
++#define DIAG_ROUTE_REQ_LEN              (4U)   /* version start max flags */
++#define DIAG_ROUTE_RECORD_LEN           (9U)
++#define DIAG_ROUTE_MAX_RECORDS          (16U)
++#define DIAG_ROUTE_FLAG_INCLUDE_INACTIVE    (0x01U)
++#define DIAG_ROUTE_FLAG_MASK            (0x01U)  /* only bit0 is defined */
++
++/* Group operation. */
++#define DIAG_GROUP_OP_REQ_LEN           (5U)   /* version op endpoint group_id[2] */
++#define DIAG_GROUP_OP_ADD               (0U)
++#define DIAG_GROUP_OP_REMOVE            (1U)
++#define DIAG_GROUP_OP_REMOVE_ALL        (2U)
++/* version status op endpoint group_id[2] zps_status used total */
++#define DIAG_GROUP_OP_RSP_LEN           (9U)
++/* Operation-status domain for the response status byte (distinct from the
++ * outer 0x8000 parse/dispatch status). */
++#define DIAG_GROUP_OP_STATUS_OK         (0U)
++#define DIAG_GROUP_OP_STATUS_ZPS_ERROR  (1U)
++
++/* Group list. */
++#define DIAG_GROUP_LIST_REQ_LEN         (4U)   /* version start max flags */
++#define DIAG_GROUP_LIST_MAX_RECORDS     (5U)
++#define DIAG_GROUP_LIST_MAX_ENDPOINTS   (16U)
++#define DIAG_GROUP_LIST_FLAG_MASK       (0x00U) /* no flags defined; must be 0 */
++/* Per-row fixed header: index[1] group_id[2] endpoint_count[1] */
++#define DIAG_GROUP_LIST_ROW_HDR_LEN     (4U)
++#define DIAG_GROUP_LIST_ROW_MAX_LEN     (DIAG_GROUP_LIST_ROW_HDR_LEN + DIAG_GROUP_LIST_MAX_ENDPOINTS)
++
++/* General diagnostics response flags. */
++#define DIAG_GENDIAG_FLAG_TCLK_UNAVAILABLE  (0x01U)
++
++/****************************************************************************/
++/***        Sentinels                                                     ***/
++/****************************************************************************/
++
++#define DIAG_U8_NA                      (0xFFU)
++#define DIAG_U16_NA                     (0xFFFFU)
++#define DIAG_IEEE_NA                    (0xFFFFFFFFFFFFFFFFULL)
++
++/****************************************************************************/
++/***        Compile-time assertions (BA GCC 4.7.4 compatible)             ***/
++/****************************************************************************/
++
++#define DIAG_STATIC_ASSERT(cond, tag) \
++    typedef char diag_static_assert_##tag[(cond) ? 1 : -1]
++
++DIAG_STATIC_ASSERT(DIAG_CAP_RSP_LEN == 24U, cap_rsp_len);
++DIAG_STATIC_ASSERT(DIAG_CAP_REQ_LEN == 10U, cap_req_len);
++DIAG_STATIC_ASSERT(DIAG_PAGE_PREFIX_LEN == 7U, page_prefix_len);
++/* Every full page must fit inside the advertised payload budget. */
++DIAG_STATIC_ASSERT(
++    DIAG_PAGE_PREFIX_LEN + (DIAG_NEIGHBOUR_MAX_RECORDS * DIAG_NEIGHBOUR_RECORD_LEN)
++        <= DIAG_TX_PAYLOAD_MAX, neighbour_page_fits);
++DIAG_STATIC_ASSERT(
++    DIAG_PAGE_PREFIX_LEN + (DIAG_ROUTE_MAX_RECORDS * DIAG_ROUTE_RECORD_LEN)
++        <= DIAG_TX_PAYLOAD_MAX, route_page_fits);
++DIAG_STATIC_ASSERT(
++    DIAG_PAGE_PREFIX_LEN + (DIAG_GROUP_LIST_MAX_RECORDS * DIAG_GROUP_LIST_ROW_MAX_LEN)
++        <= DIAG_TX_PAYLOAD_MAX, group_list_page_fits);
++DIAG_STATIC_ASSERT(DIAG_CAP_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, cap_fits);
++DIAG_STATIC_ASSERT(DIAG_GROUP_OP_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, group_op_fits);
++/* The advertised endpoint-number space fits the group endpoint bitmap. */
++DIAG_STATIC_ASSERT(DIAG_GROUP_LIST_MAX_ENDPOINTS <= 242U, group_ep_cap);
++
++/****************************************************************************/
++/***        Public handler entry points                                   ***/
++/****************************************************************************/
++
++/* Each handler validates its request with strict fixed-length bounds, emits
++ * the stock 7-byte E_SL_MSG_STATUS (0x8000) frame first, then, on success,
++ * emits its versioned response frame. pu8Rx points at the received UART
++ * payload (au8LinkRxBuffer); u16Len is the received payload length. */
++PUBLIC void CUSTOMDIAG_vHandleCapability(uint16 u16Len, const uint8 *pu8Rx);
++PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len);
++PUBLIC void CUSTOMDIAG_vHandleNeighbours(uint16 u16Len, const uint8 *pu8Rx);
++PUBLIC void CUSTOMDIAG_vHandleRoutes(uint16 u16Len, const uint8 *pu8Rx);
++PUBLIC void CUSTOMDIAG_vHandleGroupOp(uint16 u16Len, const uint8 *pu8Rx);
++PUBLIC void CUSTOMDIAG_vHandleGroupList(uint16 u16Len, const uint8 *pu8Rx);
++
++#endif /* CUSTOM_DIAG_H_ */
+diff --git a/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/custom_diag.c b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/custom_diag.c
+new file mode 100644
+--- /dev/null
++++ b/ModuleRadio/Firmware/src/ZiGate/Source/ZigbeeNodeControlBridge/custom_diag.c
+@@ -0,0 +1,742 @@
++/****************************************************************************
++ *
++ * MODULE:  custom_diag.c
++ *
++ * DESCRIPTION:
++ *   Implementation of the compact versioned read-only UART diagnostic
++ *   extension declared in custom_diag.h. See that header for the safety
++ *   envelope. Nothing here mutates persistent network identity, exposes key
++ *   material, or performs raw PDM / credential-flash access.
++ *
++ *   Synchronisation note: the local neighbour and route tables are read using
++ *   the same lock-free, copy-then-serialise strategy already used by the stock
++ *   0x0015 address-map handler (which reads psNtActv and resolves the mapped
++ *   IEEE address with no mutex). APP_vProcessIncomingSerialCommands() and the
++ *   ZPS stack run cooperatively in the same application task, so each table
++ *   entry is snapshotted into locals immediately before serialisation to
++ *   minimise the chance of a torn read. No ZPS mutex is held across a
++ *   vSL_WriteMessage() call.
++ *
++ ****************************************************************************/
++
++/****************************************************************************/
++/***        Include files                                                 ***/
++/****************************************************************************/
++
++#include <jendefs.h>
++#include <string.h>
++#include "SerialLink.h"
++#include "app_common.h"
++#include "AppApi.h"
++#include "AppHardwareApi.h"
++#include "PDM.h"
++#include "pdum_apl.h"
++#include "pdum_nwk.h"
++#include "zps_apl.h"
++#include "zps_apl_zdo.h"
++#include "zps_apl_aib.h"
++#include "zps_apl_af.h"
++#include "zps_nwk_nib.h"
++#include "zps_nwk_sec.h"
++#include "mac_sap.h"
++#include "bdb_api.h"
++#include "tclk_diagnostic.h"
++#include "custom_diag.h"
++
++/****************************************************************************/
++/***        External application state                                    ***/
++/****************************************************************************/
++
++extern tsBDB       sBDB;        /* BDB attributes, incl. bbdbNodeIsOnANetwork */
++extern tsZllState  sZllState;   /* Application device/node state              */
++
++/****************************************************************************/
++/***        Local shared response buffer                                  ***/
++/***                                                                       ***/
++/*** Single static buffer reused by every handler. The extra LQI byte      ***/
++/*** appended by vSL_WriteMessage() is covered by DIAG_TX_LQI_RESERVE.     ***/
++/*** Safe because serial commands are dispatched sequentially from a single***/
++/*** application-task context with no handler re-entrancy.                 ***/
++/****************************************************************************/
++
++PRIVATE uint8 s_au8DiagTx[DIAG_TX_BUFFER_SIZE];
++
++/****************************************************************************/
++/***        Local helpers                                                 ***/
++/****************************************************************************/
++
++/* Emit the stock 7-byte E_SL_MSG_STATUS (0x8000) frame, matching the exact
++ * field order used by every other command in app_Znc_cmds.c. */
++PRIVATE void vDiagSendStatus(uint16 u16PacketType, uint8 u8Status)
++{
++    uint8 au8Status[8];   /* 7 payload bytes + 1 reserved LQI byte */
++    uint8 u8Length = 0;
++
++    ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], u8Status,             u8Length );
++    ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], 0,                    u8Length ); /* seq num      */
++    ZNC_BUF_U16_UPD ( &au8Status[ u8Length ], u16PacketType,        u8Length );
++    ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], 0,                    u8Length ); /* request sent */
++    ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], 0,                    u8Length ); /* aps seq num  */
++    ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], PDUM_u8GetNpduUse(),  u8Length );
++    ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], u8GetApduUse(),       u8Length );
++
++    vSL_WriteMessage(E_SL_MSG_STATUS, u8Length, au8Status, 0);
++}
++
++/* Return the full TX power PIB byte as returned by the PHY, or DIAG_U8_NA on
++ * failure. The full byte is preserved (including the tolerance bit 0x40 that
++ * MiniMac reports); the masked 6-bit level and signed code are derived
++ * separately below. */
++PRIVATE uint8 u8DiagTxPowerRaw(void)
++{
++    uint32 u32TxPower = 0;
++
++    if (eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32TxPower) == PHY_ENUM_SUCCESS)
++    {
++        return (uint8)(u32TxPower & 0xFFU);
++    }
++    return DIAG_U8_NA;
++}
++
++/* Masked 6-bit TX power level (raw & PHY_PIB_TX_POWER_MASK). */
++PRIVATE uint8 u8DiagTxPowerLevel(uint8 u8Raw)
++{
++    if (u8Raw == DIAG_U8_NA) { return DIAG_U8_NA; }
++    return (uint8)(u8Raw & PHY_PIB_TX_POWER_MASK);
++}
++
++/* Six-bit signed power code interpretation of the masked level:
++ * (level & 0x20) ? level - 64 : level. This is the raw signed six-bit code,
++ * NOT an exact radiated/effective dBm figure (the closed PHY exposes no exact
++ * raw->dBm table). */
++PRIVATE int8 i8DiagTxPowerSignedCode(uint8 u8Level)
++{
++    if (u8Level == DIAG_U8_NA) { return (int8)0x80; }  /* NA sentinel */
++    if (u8Level & 0x20U)       { return (int8)((int)u8Level - 64); }
++    return (int8)u8Level;
++}
++
++/* Count used neighbour-table entries (address below the broadcast sentinels). */
++PRIVATE void vDiagNeighbourUsage(ZPS_tsNwkNib *psNib, uint8 *pu8Used, uint8 *pu8Total)
++{
++    uint16 i;
++    uint16 u16Total = psNib->sTblSize.u16NtActv;
++    uint16 u16Used  = 0;
++
++    for (i = 0; i < u16Total; i++)
++    {
++        if (psNib->sTbl.psNtActv[i].uAncAttrs.bfBitfields.u1Used &&
++            psNib->sTbl.psNtActv[i].u16NwkAddr < 0xFFFEU)
++        {
++            u16Used++;
++        }
++    }
++    *pu8Used  = (u16Used  > 0xFFU) ? 0xFFU : (uint8)u16Used;
++    *pu8Total = (u16Total > 0xFFU) ? 0xFFU : (uint8)u16Total;
++}
++
++/* Count active route-table entries (status field non-idle). */
++PRIVATE void vDiagRouteUsage(ZPS_tsNwkNib *psNib, uint8 *pu8Used, uint8 *pu8Total)
++{
++    uint16 i;
++    uint16 u16Total = psNib->sTblSize.u16Rt;
++    uint16 u16Used  = 0;
++
++    for (i = 0; i < u16Total; i++)
++    {
++        if (psNib->sTbl.psRt[i].u16NwkDstAddr < 0xFFFEU)
++        {
++            u16Used++;
++        }
++    }
++    *pu8Used  = (u16Used  > 0xFFU) ? 0xFFU : (uint8)u16Used;
++    *pu8Total = (u16Total > 0xFFU) ? 0xFFU : (uint8)u16Total;
++}
++
++/* Return TRUE if the group entry references at least one endpoint. */
++PRIVATE bool_t bDiagGroupEntryUsed(const ZPS_tsAplApsmeGroupTableEntry *psEntry)
++{
++    uint8 i;
++
++    if (psEntry->u16Groupid == 0U)
++    {
++        return FALSE;
++    }
++    for (i = 0; i < sizeof(psEntry->au8Endpoint); i++)
++    {
++        if (psEntry->au8Endpoint[i] != 0U)
++        {
++            return TRUE;
++        }
++    }
++    return FALSE;
++}
++
++PRIVATE void vDiagGroupUsage(ZPS_tsAplApsmeAIBGroupTable *psGroup,
++                             uint8 *pu8Used, uint8 *pu8Total)
++{
++    uint32 i;
++    uint32 u32Total = (psGroup != NULL) ? psGroup->u32SizeOfGroupTable : 0U;
++    uint32 u32Used  = 0;
++
++    for (i = 0; i < u32Total; i++)
++    {
++        if (bDiagGroupEntryUsed(&psGroup->psAplApsmeGroupTableId[i]))
++        {
++            u32Used++;
++        }
++    }
++    *pu8Used  = (u32Used  > 0xFFU) ? 0xFFU : (uint8)u32Used;
++    *pu8Total = (u32Total > 0xFFU) ? 0xFFU : (uint8)u32Total;
++}
++
++/****************************************************************************/
++/***        Capability negotiation (0x0D0F / 0x8D0F)                      ***/
++/****************************************************************************/
++
++PUBLIC void CUSTOMDIAG_vHandleCapability(uint16 u16Len, const uint8 *pu8Rx)
++{
++    uint8  u8Status = E_SL_MSG_STATUS_SUCCESS;
++    uint32 u32Nonce = 0;
++    uint8  u8Length = 0;
++
++    /* Strict fixed-length + magic validation. */
++    if (u16Len != DIAG_CAP_REQ_LEN ||
++        pu8Rx[0] != DIAG_CAP_MAGIC_0 || pu8Rx[1] != DIAG_CAP_MAGIC_1 ||
++        pu8Rx[2] != DIAG_CAP_MAGIC_2 || pu8Rx[3] != DIAG_CAP_MAGIC_3)
++    {
++        u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
++    }
++
++    vDiagSendStatus(E_SL_MSG_CAPABILITY_REQ, u8Status);
++    if (u8Status != E_SL_MSG_STATUS_SUCCESS)
++    {
++        return;
++    }
++
++    /* Host major/minor at [4]/[5] are accepted for logging only; the nonce is
++     * echoed verbatim so the host can match request and response. */
++    u32Nonce = ZNC_RTN_U32(pu8Rx, 6);
++
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_CAP_MAGIC_0,   u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_CAP_MAGIC_1,   u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_CAP_MAGIC_2,   u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_CAP_MAGIC_3,   u8Length );
++    ZNC_BUF_U32_UPD ( &s_au8DiagTx[ u8Length ], u32Nonce,           u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_PROTO_MAJOR,   u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_PROTO_MINOR,   u8Length );
++    ZNC_BUF_U32_UPD ( &s_au8DiagTx[ u8Length ], DIAG_FW_BUILD_ID,   u8Length );
++    ZNC_BUF_U64_UPD ( &s_au8DiagTx[ u8Length ], DIAG_CAP_BITMAP,    u8Length );
++    ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], DIAG_TX_PAYLOAD_MAX, u8Length );
++
++    vSL_WriteMessage(E_SL_MSG_CAPABILITY_RSP, u8Length, s_au8DiagTx, 0);
++}
++
++/****************************************************************************/
++/***        General read-only diagnostics (0x0D1F / 0x8D1F)               ***/
++/****************************************************************************/
++
++PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
++{
++    uint8         u8Length = 0;
++    void         *pvNwk;
++    ZPS_tsNwkNib *psNib;
++    ZPS_tsAplApsmeAIBGroupTable *psGroup;
++    uint32        u32Channel = 0;
++    uint8         u8NbUsed = 0, u8NbTotal = 0;
++    uint8         u8RtUsed = 0, u8RtTotal = 0;
++    uint8         u8GrUsed = 0, u8GrTotal = 0;
++    uint8         u8TxRaw;
++    uint8         u8TxLevel;
++    uint8         u8DiagFlags = 0;
++    uint8         au8Tclk[sizeof(TCLKDIAG_tsState)];
++    uint8         u8TclkCb, u8TclkAddRepl, u8TclkCred;
++
++    if (u16Len != 0)
++    {
++        vDiagSendStatus(E_SL_MSG_GENERAL_DIAG_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++
++    vDiagSendStatus(E_SL_MSG_GENERAL_DIAG_REQ, E_SL_MSG_STATUS_SUCCESS);
++
++    pvNwk = ZPS_pvAplZdoGetNwkHandle();
++    psNib = ZPS_psNwkNibGetHandle(pvNwk);
++    psGroup = ZPS_psAplAibGetAib()->psAplApsmeGroupTable;
++
++    (void)eAppApiPlmeGet(PHY_PIB_ATTR_CURRENT_CHANNEL, &u32Channel);
++    vDiagNeighbourUsage(psNib, &u8NbUsed, &u8NbTotal);
++    vDiagRouteUsage(psNib, &u8RtUsed, &u8RtTotal);
++    vDiagGroupUsage(psGroup, &u8GrUsed, &u8GrTotal);
++    u8TxRaw = u8DiagTxPowerRaw();
++    u8TxLevel = u8DiagTxPowerLevel(u8TxRaw);
++
++    /* TCLK summary via the same odd/even snapshot protocol used by 0x0D00.
++     * If no stable snapshot is available, flag it and emit NA sentinels rather
++     * than reading the mid-update volatile state directly. Offsets match the
++     * fixed TCLKDIAG_tsState ABI (0x18 status, 0x1b add/replace, 0x1c cred). */
++    if (TCLKDIAG_bSnapshot(au8Tclk))
++    {
++        u8TclkCb      = au8Tclk[0x18];
++        u8TclkAddRepl = au8Tclk[0x1b];
++        u8TclkCred    = au8Tclk[0x1c];
++    }
++    else
++    {
++        u8DiagFlags  |= DIAG_GENDIAG_FLAG_TCLK_UNAVAILABLE;
++        u8TclkCb      = DIAG_U8_NA;
++        u8TclkAddRepl = DIAG_U8_NA;
++        u8TclkCred    = DIAG_U8_NA;
++    }
++
++    /* Header */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_RSP_VERSION,  u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], E_SL_MSG_STATUS_SUCCESS, u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8DiagFlags,       u8Length );
++
++    /* Device / BDB state */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)ZPS_eAplZdoGetDeviceType(), u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sZllState.eNodeState,       u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sBDB.sAttrib.bbdbNodeIsOnANetwork, u8Length );
++
++    /* Network identity */
++    ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], ZPS_u16NwkNibGetNwkAddr(pvNwk),  u8Length );
++    ZNC_BUF_U64_UPD ( &s_au8DiagTx[ u8Length ], ZPS_u64NwkNibGetExtAddr(pvNwk),  u8Length );
++    ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], ZPS_u16NwkNibGetMacPanId(pvNwk), u8Length );
++    ZNC_BUF_U64_UPD ( &s_au8DiagTx[ u8Length ], ZPS_u64NwkNibGetEpid(pvNwk),     u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)u32Channel,               u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], psNib->sPersist.u8UpdateId,      u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)ZPS_bGetPermitJoiningStatus(), u8Length );
++
++    /* Security metadata (no key bytes) */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)ZPS_bNwkSecHaveNetworkKey(pvNwk), u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], psNib->sPersist.u8ActiveKeySeqNumber,   u8Length );
++
++    /* Table occupancy */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8NbUsed,  u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8NbTotal, u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8RtUsed,  u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8RtTotal, u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8GrUsed,  u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8GrTotal, u8Length );
++
++    /* Buffer / packet engine occupancy */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], PDUM_u8GetNpduUse(), u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8GetApduUse(),      u8Length );
++
++    /* TX power: full PIB byte, masked 6-bit level, six-bit signed power code.
++     * The signed code is NOT an exact radiated dBm value. */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxRaw,     u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxLevel,   u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i8DiagTxPowerSignedCode(u8TxLevel), u8Length );
++
++    /* PDM occupancy / wear (safe, read-only) */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], PDM_u8GetSegmentCapacity(),  u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], PDM_u8GetSegmentOccupancy(), u8Length );
++
++    /* TCLK diagnostic summary (statuses only, never key bytes) */
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TclkCb,      u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TclkAddRepl, u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TclkCred,    u8Length );
++
++    vSL_WriteMessage(E_SL_MSG_GENERAL_DIAG_RSP, u8Length, s_au8DiagTx, 0);
++}
++
++/****************************************************************************/
++/***        Paginated local neighbour table (0x0D14 / 0x8D14)            ***/
++/****************************************************************************/
++
++PUBLIC void CUSTOMDIAG_vHandleNeighbours(uint16 u16Len, const uint8 *pu8Rx)
++{
++    uint8         u8ReqVersion;
++    uint8         u8Start;
++    uint8         u8Max;
++    uint8         u8Flags;
++    uint8         u8Length = 0;
++    uint8         u8Returned = 0;
++    uint16        u16Total;
++    uint16        i;
++    void         *pvNwk;
++    ZPS_tsNwkNib *psNib;
++
++    /* Strict fixed-length + bounds validation. */
++    if (u16Len != DIAG_NEIGHBOUR_REQ_LEN)
++    {
++        vDiagSendStatus(E_SL_MSG_LOCAL_NEIGHBOUR_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++    u8ReqVersion = pu8Rx[0];
++    u8Start      = pu8Rx[1];
++    u8Max        = pu8Rx[2];
++    u8Flags      = pu8Rx[3];
++
++    if (u8ReqVersion != DIAG_REQ_VERSION ||
++        u8Max == 0U || u8Max > DIAG_NEIGHBOUR_MAX_RECORDS ||
++        (u8Flags & ~DIAG_NEIGHBOUR_FLAG_MASK) != 0U)
++    {
++        vDiagSendStatus(E_SL_MSG_LOCAL_NEIGHBOUR_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++
++    vDiagSendStatus(E_SL_MSG_LOCAL_NEIGHBOUR_REQ, E_SL_MSG_STATUS_SUCCESS);
++
++    pvNwk = ZPS_pvAplZdoGetNwkHandle();
++    psNib = ZPS_psNwkNibGetHandle(pvNwk);
++    u16Total = psNib->sTblSize.u16NtActv;
++
++    /* Reserve prefix space; fill records first, then back-fill the prefix. */
++    u8Length = DIAG_PAGE_PREFIX_LEN;
++
++    for (i = u8Start; i < u16Total && u8Returned < u8Max; i++)
++    {
++        /* Per-entry snapshot into locals (see file-level synchronisation note). */
++        ZPS_tsNwkActvNtEntry sEntry = psNib->sTbl.psNtActv[i];
++        uint64 u64Ieee;
++        uint8  u8Used = (uint8)sEntry.uAncAttrs.bfBitfields.u1Used;
++
++        if (u8Used == 0U &&
++            (u8Flags & DIAG_NEIGHBOUR_FLAG_INCLUDE_UNUSED) == 0U)
++        {
++            continue;
++        }
++
++        /* Only resolve the mapped IEEE address when the entry is used and its
++         * lookup index is within the address-map bounds; otherwise the mapped
++         * IEEE is meaningless, so emit the all-FF unavailable sentinel. */
++        if (u8Used != 0U && sEntry.u16Lookup < psNib->sTblSize.u16AddrMap)
++        {
++            u64Ieee = ZPS_u64NwkNibGetMappedIeeeAddr(pvNwk, sEntry.u16Lookup);
++        }
++        else
++        {
++            u64Ieee = DIAG_IEEE_NA;
++        }
++
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i,               u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Used,                 u8Length );
++        ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], sEntry.u16NwkAddr,      u8Length );
++        ZNC_BUF_U64_UPD ( &s_au8DiagTx[ u8Length ], u64Ieee,                u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u2Relationship, u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u1DeviceType,   u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u1RxOnWhenIdle, u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u1Authenticated,u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], sEntry.u8LinkQuality,   u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], sEntry.u8Age,           u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], sEntry.u8TxFailed,      u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u3OutgoingCost, u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.i8TXPower, u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], sEntry.u8MacID,         u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], sEntry.u8ZedTimeoutindex, u8Length );
++
++        u8Returned++;
++    }
++
++    /* Back-fill the common prefix, including the resume cursor (i == index one
++     * past the last slot scanned; equals total when the scan reached the end). */
++    {
++        uint8 u8Prefix = 0;
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], DIAG_RSP_VERSION,        u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], E_SL_MSG_STATUS_SUCCESS, u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Flags,                 u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Start,                 u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], (uint8)((u16Total > 0xFFU) ? 0xFFU : u16Total), u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Returned,              u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], (uint8)((i > 0xFFU) ? 0xFFU : i), u8Prefix );
++    }
++
++    vSL_WriteMessage(E_SL_MSG_LOCAL_NEIGHBOUR_RSP, u8Length, s_au8DiagTx, 0);
++}
++
++/****************************************************************************/
++/***        Paginated local route table (0x0D15 / 0x8D15)                ***/
++/****************************************************************************/
++
++PUBLIC void CUSTOMDIAG_vHandleRoutes(uint16 u16Len, const uint8 *pu8Rx)
++{
++    uint8         u8ReqVersion;
++    uint8         u8Start;
++    uint8         u8Max;
++    uint8         u8Flags;
++    uint8         u8Length = 0;
++    uint8         u8Returned = 0;
++    uint16        u16Total;
++    uint16        i;
++    void         *pvNwk;
++    ZPS_tsNwkNib *psNib;
++
++    if (u16Len != DIAG_ROUTE_REQ_LEN)
++    {
++        vDiagSendStatus(E_SL_MSG_LOCAL_ROUTE_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++    u8ReqVersion = pu8Rx[0];
++    u8Start      = pu8Rx[1];
++    u8Max        = pu8Rx[2];
++    u8Flags      = pu8Rx[3];
++
++    if (u8ReqVersion != DIAG_REQ_VERSION ||
++        u8Max == 0U || u8Max > DIAG_ROUTE_MAX_RECORDS ||
++        (u8Flags & ~DIAG_ROUTE_FLAG_MASK) != 0U)
++    {
++        vDiagSendStatus(E_SL_MSG_LOCAL_ROUTE_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++
++    vDiagSendStatus(E_SL_MSG_LOCAL_ROUTE_REQ, E_SL_MSG_STATUS_SUCCESS);
++
++    pvNwk = ZPS_pvAplZdoGetNwkHandle();
++    psNib = ZPS_psNwkNibGetHandle(pvNwk);
++    u16Total = psNib->sTblSize.u16Rt;
++
++    u8Length = DIAG_PAGE_PREFIX_LEN;
++
++    for (i = u8Start; i < u16Total && u8Returned < u8Max; i++)
++    {
++        ZPS_tsNwkRtEntry sEntry = psNib->sTbl.psRt[i];
++        uint8 u8RecordFlags = 0;
++
++        if (sEntry.u16NwkDstAddr >= 0xFFFEU &&
++            (u8Flags & DIAG_ROUTE_FLAG_INCLUDE_INACTIVE) == 0U)
++        {
++            continue;
++        }
++
++        u8RecordFlags = (uint8)(
++              (sEntry.uAncAttrs.bfBitfields.u1ManyToOne       ? 0x01U : 0U)
++            | (sEntry.uAncAttrs.bfBitfields.u1RouteRecordReqd ? 0x02U : 0U)
++            | (sEntry.uAncAttrs.bfBitfields.u1RecentlyUsed    ? 0x04U : 0U)
++            | (sEntry.uAncAttrs.bfBitfields.u1NoRouteCache    ? 0x08U : 0U)
++            | (sEntry.uAncAttrs.bfBitfields.u1GroupIdFlag     ? 0x10U : 0U));
++
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i,                u8Length );
++        ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], sEntry.u16NwkDstAddr,    u8Length );
++        ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], sEntry.u16NwkNxtHopAddr, u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u3Status, u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], sEntry.u8ExpiryCount,    u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8RecordFlags,           u8Length );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)sEntry.uAncAttrs.bfBitfields.u8TxFailure, u8Length );
++
++        u8Returned++;
++    }
++
++    {
++        uint8 u8Prefix = 0;
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], DIAG_RSP_VERSION,        u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], E_SL_MSG_STATUS_SUCCESS, u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Flags,                 u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Start,                 u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], (uint8)((u16Total > 0xFFU) ? 0xFFU : u16Total), u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Returned,              u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], (uint8)((i > 0xFFU) ? 0xFFU : i), u8Prefix );
++    }
++
++    vSL_WriteMessage(E_SL_MSG_LOCAL_ROUTE_RSP, u8Length, s_au8DiagTx, 0);
++}
++
++/****************************************************************************/
++/***        Local APS group operation (0x0D12 / 0x8D12)                  ***/
++/****************************************************************************/
++
++PUBLIC void CUSTOMDIAG_vHandleGroupOp(uint16 u16Len, const uint8 *pu8Rx)
++{
++    uint8        u8ReqVersion;
++    uint8        u8Op;
++    uint8        u8Endpoint;
++    uint16       u16GroupId;
++    uint8        u8Length = 0;
++    ZPS_teStatus eZpsStatus = 0xFFU;
++    uint8        u8Used = 0, u8Total = 0;
++    uint8        u8OpStatus;
++    bool         bEnabled = FALSE;
++    ZPS_tsAplApsmeAIBGroupTable *psGroup;
++
++    if (u16Len != DIAG_GROUP_OP_REQ_LEN)
++    {
++        vDiagSendStatus(E_SL_MSG_GROUP_OP_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++    u8ReqVersion = pu8Rx[0];
++    u8Op         = pu8Rx[1];
++    u8Endpoint   = pu8Rx[2];
++    u16GroupId   = ZNC_RTN_U16(pu8Rx, 3);
++
++    /* Validate: version, operation, endpoint (1..240), and group id where the
++     * operation consumes it. Group id 0x0000 and reserved >0xFFF7 are invalid. */
++    if (u8ReqVersion != DIAG_REQ_VERSION ||
++        u8Op > DIAG_GROUP_OP_REMOVE_ALL ||
++        u8Endpoint == 0U || u8Endpoint > 240U ||
++        ((u8Op == DIAG_GROUP_OP_ADD || u8Op == DIAG_GROUP_OP_REMOVE) &&
++         (u16GroupId == 0U || u16GroupId > 0xFFF7U)))
++    {
++        vDiagSendStatus(E_SL_MSG_GROUP_OP_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++
++    /* The endpoint must be an actually registered and enabled local endpoint. */
++    if (ZPS_eAplAfGetEndpointState(u8Endpoint, &bEnabled) != ZPS_E_SUCCESS ||
++        !bEnabled)
++    {
++        vDiagSendStatus(E_SL_MSG_GROUP_OP_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++
++    psGroup = ZPS_psAplAibGetAib()->psAplApsmeGroupTable;
++    vDiagGroupUsage(psGroup, &u8Used, &u8Total);
++
++    /* Capacity guard for add: refuse if the table is full and the group is not
++     * already present. The stack API performs the actual persisted update via
++     * the APS group table -- never a raw 0xF002 PDM write. */
++    if (u8Op == DIAG_GROUP_OP_ADD && u8Used >= u8Total)
++    {
++        bool_t bExisting = FALSE;
++        uint32 i;
++        for (i = 0; psGroup != NULL && i < psGroup->u32SizeOfGroupTable; i++)
++        {
++            if (psGroup->psAplApsmeGroupTableId[i].u16Groupid == u16GroupId &&
++                bDiagGroupEntryUsed(&psGroup->psAplApsmeGroupTableId[i]))
++            {
++                bExisting = TRUE;
++                break;
++            }
++        }
++        if (!bExisting)
++        {
++            vDiagSendStatus(E_SL_MSG_GROUP_OP_REQ, E_SL_MSG_STATUS_BUSY);
++            return;
++        }
++    }
++
++    switch (u8Op)
++    {
++        case DIAG_GROUP_OP_ADD:
++            eZpsStatus = ZPS_eAplZdoGroupEndpointAdd(u16GroupId, u8Endpoint);
++            break;
++        case DIAG_GROUP_OP_REMOVE:
++            eZpsStatus = ZPS_eAplZdoGroupEndpointRemove(u16GroupId, u8Endpoint);
++            break;
++        case DIAG_GROUP_OP_REMOVE_ALL:
++            eZpsStatus = ZPS_eAplZdoGroupAllEndpointRemove(u8Endpoint);
++            break;
++        default:
++            break;
++    }
++
++    /* The outer 0x8000 status reports only that the request was well-formed and
++     * dispatched; the actual operation outcome is carried in the response's own
++     * status byte (DIAG_GROUP_OP_STATUS_*) plus the raw zps_status field. */
++    vDiagSendStatus(E_SL_MSG_GROUP_OP_REQ, E_SL_MSG_STATUS_SUCCESS);
++
++    /* Refresh usage after the operation. */
++    vDiagGroupUsage(psGroup, &u8Used, &u8Total);
++
++    u8OpStatus = (eZpsStatus == ZPS_E_SUCCESS)
++                 ? DIAG_GROUP_OP_STATUS_OK : DIAG_GROUP_OP_STATUS_ZPS_ERROR;
++
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_RSP_VERSION,        u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8OpStatus,              u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Op,                    u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Endpoint,              u8Length );
++    ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], u16GroupId,              u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)eZpsStatus,       u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Used,                  u8Length );
++    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Total,                 u8Length );
++
++    vSL_WriteMessage(E_SL_MSG_GROUP_OP_RSP, u8Length, s_au8DiagTx, 0);
++}
++
++/****************************************************************************/
++/***        Local APS group paginated list (0x0D13 / 0x8D13)             ***/
++/****************************************************************************/
++
++PUBLIC void CUSTOMDIAG_vHandleGroupList(uint16 u16Len, const uint8 *pu8Rx)
++{
++    uint8        u8ReqVersion;
++    uint8        u8Start;
++    uint8        u8Max;
++    uint8        u8Flags;
++    uint8        u8Length = 0;
++    uint8        u8Returned = 0;
++    uint32       u32Total;
++    uint32       i;
++    ZPS_tsAplApsmeAIBGroupTable *psGroup;
++
++    if (u16Len != DIAG_GROUP_LIST_REQ_LEN)
++    {
++        vDiagSendStatus(E_SL_MSG_GROUP_LIST_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++    u8ReqVersion = pu8Rx[0];
++    u8Start      = pu8Rx[1];
++    u8Max        = pu8Rx[2];
++    u8Flags      = pu8Rx[3];
++
++    if (u8ReqVersion != DIAG_REQ_VERSION ||
++        u8Max == 0U || u8Max > DIAG_GROUP_LIST_MAX_RECORDS ||
++        (u8Flags & ~DIAG_GROUP_LIST_FLAG_MASK) != 0U)
++    {
++        vDiagSendStatus(E_SL_MSG_GROUP_LIST_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
++        return;
++    }
++
++    vDiagSendStatus(E_SL_MSG_GROUP_LIST_REQ, E_SL_MSG_STATUS_SUCCESS);
++
++    psGroup  = ZPS_psAplAibGetAib()->psAplApsmeGroupTable;
++    u32Total = (psGroup != NULL) ? psGroup->u32SizeOfGroupTable : 0U;
++
++    u8Length = DIAG_PAGE_PREFIX_LEN;
++
++    for (i = u8Start; i < u32Total && u8Returned < u8Max; i++)
++    {
++        const ZPS_tsAplApsmeGroupTableEntry *psEntry =
++            &psGroup->psAplApsmeGroupTableId[i];
++        uint8 u8CountPos;
++        uint8 u8EpCount = 0;
++        uint16 u16Bit;
++
++        if (!bDiagGroupEntryUsed(psEntry))
++        {
++            continue;
++        }
++
++        /* Physical table index first, so the host can correlate rows and resume
++         * across holes even when a page returns fewer than max rows. */
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i,            u8Length );
++        ZNC_BUF_U16_UPD ( &s_au8DiagTx[ u8Length ], psEntry->u16Groupid, u8Length );
++        u8CountPos = u8Length;                 /* endpoint_count back-filled */
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], 0, u8Length );
++
++        for (u16Bit = 0;
++             u16Bit < (sizeof(psEntry->au8Endpoint) * 8U) &&
++             u8EpCount < DIAG_GROUP_LIST_MAX_ENDPOINTS;
++             u16Bit++)
++        {
++            if (psEntry->au8Endpoint[u16Bit >> 3] & (uint8)(1U << (u16Bit & 7U)))
++            {
++                uint8 u8Dummy = u8Length;
++                ZNC_BUF_U8_UPD ( &s_au8DiagTx[ u8Length ], (uint8)u16Bit, u8Dummy );
++                u8Length = u8Dummy;
++                u8EpCount++;
++            }
++        }
++
++        s_au8DiagTx[u8CountPos] = u8EpCount;   /* back-fill endpoint_count */
++        u8Returned++;
++    }
++
++    {
++        uint8 u8Prefix = 0;
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], DIAG_RSP_VERSION,        u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], E_SL_MSG_STATUS_SUCCESS, u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Flags,                 u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Start,                 u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], (uint8)((u32Total > 0xFFU) ? 0xFFU : u32Total), u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], u8Returned,              u8Prefix );
++        ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Prefix ], (uint8)((i > 0xFFU) ? 0xFFU : i), u8Prefix );
++    }
++
++    vSL_WriteMessage(E_SL_MSG_GROUP_LIST_RSP, u8Length, s_au8DiagTx, 0);
++}
++
++/****************************************************************************/
++/***        END OF FILE                                                   ***/
++/****************************************************************************/
