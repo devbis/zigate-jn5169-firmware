@@ -44,14 +44,8 @@ license headers (the ControlBridge application note) together with OpenLumi's
 modifications. Upstream ZiGate is distributed by Fairecasoimeme / OpenLumi;
 retain their notices.
 
-## 3. Custom diagnostic protocol + hardening — `patches/`
+## 3. Local protocol and hardening changes
 
-The patch series under `patches/` is our own work (read-only TCLK diagnostics,
-the negotiated diagnostic ABI, build reproducibility). It is applied on top of
-the OpenLumi application and is subject to the same downstream constraints as
-the code it modifies (NXP application license for the touched files).
-
----
-
-No GitHub repository has been created or pushed for this tree. All history is
-local.
+Local changes are committed directly on top of the preserved SDK history. They
+remain subject to the license terms of the files they modify. Superseded TCLK
+diagnostic patch snapshots are not distributed in this repository.

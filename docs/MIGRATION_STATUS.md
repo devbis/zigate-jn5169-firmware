@@ -95,8 +95,7 @@ lowering documented capacities**. Findings:
 ## What works today (baseline established)
 
 1. **Repository structure** — v2395 SDK at the repo root with upstream history
-   preserved; application isolated under `app/`; validated patch series under
-   `patches/`.
+   preserved and the application isolated under `app/`.
 2. **Toolchain integration** — BA2 `ba-elf-gcc 4.7.4` compiles and assembles
    (verified on `irq_JN516x.S`, `portasm_JN516x.S`, `port_JN516x.c`).
 3. **Config regeneration with v2395 tools** — `PDUMConfig` and `ZPSConfig`
@@ -197,23 +196,7 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 2. Re-express the app's ControlBridge device registration against stock v2395
    `control_bridge.{c,h}` plus the overlay clusters.
 3. Resolve Blocker A symbol deltas with validated mappings.
-4. Only then apply `patches/` (after path-remapping — see below).
-
-## Patch series application  [APPLIED]
-
-`patches/0100-custom-diagnostic-protocol.patch` is the comprehensive, final
-snapshot (capability negotiation, local neighbour/route/group
-tables, general diag, canonical TX-power, `SerialLink.h`,
-`app_ahi_commands.c`, `app_zcl_event_handler.c`). It was applied with
-`patch -p5` from `app/` (path prefix `ModuleRadio/Firmware/src/ZiGate/` →
-`app/`), then the rev4 correction (below) removed the TCLK 0x0D00 subsystem it
-had introduced. It adds `custom_diag.c` to the app `Makefile`, reconciled with
-the overlay's existing `APPSRC`/`INCFLAGS`/`vpath` additions.
-
-`patches/0080-*` and `patches/0090-*` are **superseded earlier iterations**
-(each recreates `tclk_diagnostic.{c,h}` from scratch); they are retained under
-`patches/` for provenance only and are **not** applied. `0001-build-
-reproducibility.patch` is already reflected in `scripts/build.sh`.
+4. Add protocol extensions and safety fixes as reviewable commits.
 
 ## Diagnostic ABI — proto 1.2 / build rev 4
 

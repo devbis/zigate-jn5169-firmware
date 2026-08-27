@@ -4,10 +4,9 @@ Private, standalone firmware tree for a **ZiGate v1 (JN5169)** Zigbee
 **coordinator**, built on the **NXP JN-SW-4170 v2395** SDK, carrying the
 OpenLumi ZiGate v3.23 application and our custom read-only diagnostic protocol.
 
-> Status: **migration in progress.** The repository, build system, and v2395
-> config regeneration are in place and working; the OpenLumi application subtree
-> is being ported from SDK build 1840 to v2395. See
-> [`docs/MIGRATION_STATUS.md`](docs/MIGRATION_STATUS.md) for the exact blockers.
+> Status: **compiling baseline; hardware qualification pending.** The OpenLumi
+> application builds and links reproducibly against SDK v2395 with Green Power
+> Proxy enabled. See [`docs/MIGRATION_STATUS.md`](docs/MIGRATION_STATUS.md).
 
 ## Layout
 
@@ -17,7 +16,6 @@ OpenLumi ZiGate v3.23 application and our custom read-only diagnostic protocol.
   app/                Application subtree (OpenLumi ZiGate ControlBridge)
     Source/{ZigbeeNodeControlBridge,Common}/
     Build/ZigbeeNodeControlBridge/Makefile
-  patches/            Custom-diagnostic + reproducibility patch series (inputs)
   scripts/build.sh    Reproducible build wrapper
   docs/               PROVENANCE.md, MIGRATION_STATUS.md
   LICENSES/           Licensing / provenance notices
@@ -61,11 +59,15 @@ Every build variable can be overridden from the environment (e.g.
 Reproducibility: the wrapper pins `LC_ALL=C`, `TZ=UTC`, and
 `SOURCE_DATE_EPOCH`.
 
+GitHub Actions runs `scripts/check.sh` to validate the public custom ABI and
+security invariants without the non-redistributable BA2 toolchain. Full
+firmware builds remain local until a licensed CI toolchain is available.
+
 ## Provenance & licensing
 
-Three separately-licensed inputs are kept distinct — NXP SDK (root), OpenLumi
-application (`app/`), and our patches (`patches/`). NXP SDK files retain their
-original NXP license headers. See `LICENSES/`.
+NXP SDK files retain their original license headers. OpenLumi application code
+and local changes remain identifiable through the preserved Git history. See
+`LICENSES/`.
 
 ## Safety
 

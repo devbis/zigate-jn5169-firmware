@@ -13,7 +13,7 @@ so provenance and licensing remain auditable.
 - Clone method: `git clone --single-branch --branch v2395`, then the clone
   contents (including `.git`) were promoted to the repository root so that the
   **full upstream commit history of the v2395 branch is preserved** as this
-  repository's history. The application, patches, docs, and scripts are added
+  repository's history. The application, docs, and scripts are added
   on top as new commits.
 
 This is the NXP JN-SW-4170 SDK (JN516x / JN5169). It ships the ZPS stack,
@@ -45,23 +45,13 @@ build 1840** SDK, which OpenLumi had modified at the ZCL device/cluster layer.
 Those SDK-level modifications are **not** carried into this repository; the
 migration target is stock v2395 (see `docs/MIGRATION_STATUS.md`).
 
-## 3. Custom diagnostic protocol + hardening — `patches/`
+## 3. Local protocol and hardening changes
 
-Validated patch series produced and reproducibly built during the prior
-`zigate-tclk-diagnostic` work (GP_SUPPORT=0 baseline on the 1840 SDK):
-
-| Patch                                      | Purpose                                             |
-|--------------------------------------------|-----------------------------------------------------|
-| `0001-build-reproducibility.patch`         | Deterministic build (drop timestamped `size.txt`).  |
-| `0080-tclk-diagnostic.patch`               | Read-only TCLK diagnostic (link `--wrap`).          |
-| `0090-tclk-diagnostic-uart.patch`          | UART diagnostic transport.                           |
-| `0100-custom-diagnostic-protocol.patch`    | Negotiated diagnostic ABI (proto 1.1) + rev3 canonical TX-power semantics. |
-
-These patches were authored against the OpenLumi path layout
-(`ModuleRadio/Firmware/src/ZiGate/...`). They must be **path-remapped** to the
-`app/...` layout before application (see `docs/MIGRATION_STATUS.md`). They are
-preserved verbatim here as inputs; they are **not yet applied** because the
-application subtree does not yet compile against v2395.
+The negotiated diagnostic/control ABI, reproducible build support, Green Power
+port, and safety fixes are committed directly on top of the two upstream
+histories. Superseded patch snapshots were intentionally removed because they
+contained the retired TCLK instrumentation and obsolete protocol semantics.
+Use `git log upstream/v2395..HEAD` to audit every local change.
 
 ## Toolchain (external, not vendored)
 
@@ -77,7 +67,4 @@ application subtree does not yet compile against v2395.
 - Target working directory: `/Users/afaronov/go_zboss-ncp/zigate-jn5169-firmware`.
 - No hardware was connected, halted, reset, flashed, or erased. No PDM
   operation was performed.
-- The enclosing `go_zboss-ncp` Git repository was **not** modified; this tree is
-  a nested standalone repository and is intentionally not added to the parent
-  index.
-- No GitHub repository was created or pushed.
+- The tree is a standalone repository and is not added to any enclosing index.
