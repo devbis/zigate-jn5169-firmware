@@ -3230,7 +3230,7 @@ if '' != options.ToolsDir:
 
     # When embedding the python script in the shell, the path was changed from \\
     if options.endian == "BIG_ENDIAN":
-        objdump = os.path.normpath(options.ToolsDir + '\\\\bin\\\\ba-elf-objdump')
+        objdump = os.path.normpath(options.ToolsDir + ('\\\\bin\\\\ba-elf-objdump' if os.name == 'nt' else '/bin/ba-elf-objdump'))
     else:
         if os.name == 'nt':
             objdump = os.path.normpath(options.ToolsDir + '\\\\bin\\\\arm-none-eabi-objdump')
