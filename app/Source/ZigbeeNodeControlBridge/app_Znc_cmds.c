@@ -71,6 +71,7 @@
 #include "zps_struct.h"
 #include "app_common.h"
 #include "app_Znc_cmds.h"
+#include "zigate_compat.h"
 #include "Log.h"
 #include "zcl.h"
 #include "app_events.h"
@@ -508,13 +509,13 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             {
                 uint32    u32Value;
                 u32Value      =  ZNC_RTN_U32 ( au8LinkRxBuffer, 0 );
-                sControlBridge.sTimeServerCluster.utctTime=u32Value;
+                sZigateTimeServerCluster.utctTime=u32Value;
 
             }
             break;
             case E_SL_MSG_GET_TIMESERVER:
             {
-                uint32    u32Value = sControlBridge.sTimeServerCluster.utctTime;
+                uint32    u32Value = sZigateTimeServerCluster.utctTime;
 
                 ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8Status,      u8Length );
                 ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8SeqNum,      u8Length );

@@ -216,6 +216,7 @@ APPSRC += app_Znc_cmds.c
 APPSRC += app_general_events_handler.c
 APPSRC += app_zcl_event_handler.c
 APPSRC += app_start.c
+APPSRC += zigate_compat.c
 APPSRC += SerialLink.c
 APPSRC += uart.c
 APPSRC += pdum_apdu.S
@@ -256,6 +257,7 @@ LIBNAME = $(TARGET)_PDM$(PDM_BUILD_TYPE)_BAUD_$(BAUD)_DEBUG_$(DEBUG)
 # Standard Application header search paths
 
 INCFLAGS += -I$(APP_SRC_DIR)
+INCFLAGS += -I$(APP_SRC_DIR)/zcl_overlay
 INCFLAGS += -I$(APP_SRC_DIR)/..
 INCFLAGS += -I$(APP_COMMON_SRC_DIR)
 
@@ -334,7 +336,7 @@ LDLIBS += JPT_$(JENNIC_CHIP)
 
 .PHONY: all clean
 # Path to directories containing application source
-vpath % $(APP_SRC_DIR):$(APP_COMMON_SRC_DIR):$(UTIL_SRC_DIR):$(ZCL_SRC):$(ZCL_SRC_DIRS):$(BDB_SRC_DIR):$(HWAPI_SRC_DIR)
+vpath % $(APP_SRC_DIR):$(APP_SRC_DIR)/zcl_overlay:$(APP_COMMON_SRC_DIR):$(UTIL_SRC_DIR):$(ZCL_SRC):$(ZCL_SRC_DIRS):$(BDB_SRC_DIR):$(HWAPI_SRC_DIR)
 
 all: $(GENERATED_FILE_NAME).bin
 

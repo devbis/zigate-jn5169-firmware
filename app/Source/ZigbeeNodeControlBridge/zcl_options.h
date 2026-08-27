@@ -222,7 +222,10 @@
 
 //#define CLD_BAS_ATTR_ID_XIAOMI_FF01
 //#define CLD_BAS_ATTR_ID_XIAOMI_FF02
-#define CLD_BAS_ATTR_APPLICATION_LEGRAND
+/* OpenLumi private Legrand Basic-cluster attribute (u32PrivateLegrand). Not
+ * present in stock v2395 tsCLD_Basic; disabled for the compiling baseline as a
+ * private quirk (see docs/MIGRATION_STATUS.md). */
+//#define CLD_BAS_ATTR_APPLICATION_LEGRAND
 
 
 #define CLD_BAS_APP_VERSION             (1)
@@ -371,6 +374,15 @@
 
 #define CLD_WINDOWCOVERING
 #define WINDOWCOVERING_CLIENT
+/* v2395 WindowCovering.{c,h} guard the client API on WINDOW_COVERING_CLIENT
+ * (underscored) and gate the Lift/Tilt goto commands on CLD_WC_CMD_GO_TO_*.
+ * Enable them so the v2395 client Send functions and axis payloads used by the
+ * zcl_overlay/zigate_compat wrappers are declared and compiled. */
+#define WINDOW_COVERING_CLIENT
+#define CLD_WC_CMD_GO_TO_LIFT_VALUE
+#define CLD_WC_CMD_GO_TO_LIFT_PERCENTAGE
+#define CLD_WC_CMD_GO_TO_TILT_VALUE
+#define CLD_WC_CMD_GO_TO_TILT_PERCENTAGE
 
 #define CLD_PRIVATE_PHILIPS
 #define PRIVATE_PHILIPS_SERVER

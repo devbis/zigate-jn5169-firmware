@@ -221,7 +221,7 @@ PUBLIC teZCL_Status eCLD_WindowCoveringCommandGoToTiltValueSend(
     uint8                                      u8DestinationEndPointId,
     tsZCL_Address                             *psDestinationAddress,
     uint8                                     *pu8TransactionSequenceNumber,
-    tsCLD_WindowCovering_GoToLiftValuePayload *psPayload)
+    tsCLD_WindowCovering_GoToTiltValuePayload *psPayload)
 {
 
     tsZCL_TxPayloadItem asPayloadDefinition[] = {{1, E_ZCL_UINT16, &psPayload->u16TiltValue}};

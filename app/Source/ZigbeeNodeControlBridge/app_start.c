@@ -67,6 +67,7 @@
 #include <string.h>
 #include "SerialLink.h"
 #include "app_Znc_cmds.h"
+#include "zigate_compat.h"
 #include "uart.h"
 #include "mac_pib.h"
 #include "PDM_IDs.h"
@@ -1142,7 +1143,7 @@ PRIVATE void APP_cbTimerZclTick (void*    pvParam)
     u8Tick100Ms++;
     if(u8Tick100Ms > 9)
     {
-    	sControlBridge.sTimeServerCluster.utctTime++;
+    	sZigateTimeServerCluster.utctTime++;
 #ifdef CLD_BAS_ATTR_APPLICATION_LEGRAND
     	sControlBridge.sBasicServerCluster.u32PrivateLegrand++;
 #endif

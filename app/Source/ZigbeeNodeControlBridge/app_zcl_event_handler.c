@@ -71,6 +71,7 @@
 #include "app_common.h"
 #include "AHI_AES.h"
 #include "app_events.h"
+#include "zigate_compat.h"
 #include "Log.h"
 #include "SerialLink.h"
 
@@ -955,8 +956,9 @@ PRIVATE void APP_ZCL_cbEndpointCallback ( tsZCL_CallBackEvent*    psEvent )
 					}
                     if (psCallBackMessage->u8CommandId ==0xfd)
 					{
+#ifdef ZIGATE_ENABLE_OPENLUMI_PRIVATE_QUIRKS
 						ZNC_BUF_U8_UPD ( &au8LinkTxBuffer [u16Length], psCallBackMessage->uMessage.u8LoraTapData,    u16Length );
-
+#endif
 					}
 
                     vSL_WriteMessage ( E_SL_MSG_ONOFF_UPDATE,
@@ -1199,6 +1201,7 @@ PRIVATE void APP_ZCL_cbEndpointCallback ( tsZCL_CallBackEvent*    psEvent )
                     }
                     break; // SCENE MEMBERSHIP RESPONSE
 
+#ifdef ZIGATE_ENABLE_OPENLUMI_PRIVATE_QUIRKS
                     case (E_CLD_SCENES_CMD_IKEA_REMOTE_SHORT_CLICK):
                     case (E_CLD_SCENES_CMD_IKEA_REMOTE_BUTTON_DOWN):
                     case (E_CLD_SCENES_CMD_IKEA_REMOTE_BUTTON_UP):
@@ -1211,6 +1214,7 @@ PRIVATE void APP_ZCL_cbEndpointCallback ( tsZCL_CallBackEvent*    psEvent )
                         u16Command = E_SL_MSG_SCENE_IKEA_REMOTE_BUTTON_PRESS;
                     }
                     break;//IKEA REMOTE CUSTOM
+#endif
 
                     default:
                     break;
