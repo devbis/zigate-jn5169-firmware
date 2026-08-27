@@ -100,6 +100,10 @@ typedef enum
     E_SL_MSG_NODE_FACTORY_NEW_RESTART                          =   0x8007,
     E_SL_MSG_GET_VERSION                                       =   0x0010,
     E_SL_MSG_VERSION_LIST                                      =   0x8010,
+    /* 0x0D00/0x8D00: RESERVED/REMOVED. Formerly the TCLK diagnostic feature
+     * (crypto-path --wrap interposition + internal security-state export).
+     * Removed as security-sensitive; the request ID is retained only so the
+     * handler can reply E_SL_MSG_STATUS_UNHANDLED_COMMAND. Do not reuse. */
     E_SL_MSG_GET_TCLK_DIAGNOSTIC                               =   0x0D00,
     E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE                          =   0x8D00,
 

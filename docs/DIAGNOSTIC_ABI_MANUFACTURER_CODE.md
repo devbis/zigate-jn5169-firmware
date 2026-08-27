@@ -1,10 +1,10 @@
 # Diagnostic ABI — negotiated coordinator manufacturer-code command
 
-Status: **design / not yet implemented in firmware C** (the application subtree
-does not compile against v2395 yet — see `MIGRATION_STATUS.md`). This document
-is the normative wire contract that the Go host
-(`adapter/zigate`, `zigbee/manager`) codes against, and that the firmware must
-implement when the ControlBridge port compiles.
+Status: **implemented in firmware C** against v2395 (the ControlBridge port
+compiles and links — see `MIGRATION_STATUS.md`). This document is the normative
+wire contract that the Go host (`adapter/zigate`, `zigbee/manager`) codes
+against, and that the firmware implements. The custom diagnostic protocol is at
+**proto 1.2 / build rev 4** (`custom_diag.h`).
 
 ## Rationale
 
@@ -46,7 +46,9 @@ firmware must not claim, and the host must not assume, per-device scoping.
 | `E_SL_MSG_MANUFACTURER_CODE_RSP`       | `0x8D16` |
 
 (`0x0D16`/`0x8D16` are otherwise unused in the reserved custom range; see
-`SerialLink.h` allocations `0x0D00`, `0x0D0F`, `0x0D12`–`0x0D15`, `0x0D1F`.)
+`SerialLink.h` allocations `0x0D0F`, `0x0D12`–`0x0D15`, `0x0D1F`. `0x0D00` is
+**reserved/removed** — it was the TCLK diagnostic feature, deleted as
+security-sensitive; the request ID now replies `0x8000` status "unhandled".)
 
 ### Request payload (application bytes, big-endian)
 

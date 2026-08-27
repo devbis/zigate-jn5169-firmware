@@ -40,7 +40,6 @@
 #include "zps_nwk_sec.h"
 #include "mac_sap.h"
 #include "bdb_api.h"
-#include "tclk_diagnostic.h"
 #include "custom_diag.h"
 #include "zcl_options.h"   /* ZCL_MANUFACTURER_CODE (baked-in default) */
 
@@ -84,37 +83,46 @@ PRIVATE void vDiagSendStatus(uint16 u16PacketType, uint8 u8Status)
     vSL_WriteMessage(E_SL_MSG_STATUS, u8Length, au8Status, 0);
 }
 
-/* Return the full TX power PIB byte as returned by the PHY, or DIAG_U8_NA on
- * failure. The full byte is preserved (including the tolerance bit 0x40 that
- * MiniMac reports); the masked 6-bit level and signed code are derived
- * separately below. */
-PRIVATE uint8 u8DiagTxPowerRaw(void)
+/* rev4: canonical SIX-BIT TX-power code = GET & 0x3F.
+ *
+ * Per the HIL + MiniMac disassembly the MiniMac TX-power PIB is a 6-bit
+ * two's-complement code and the raw i8 GET is sign-extended (e.g. code -8 reads
+ * back as 0xFFFFFFF8). Masking the GET to 0x3F yields the canonical,
+ * round-trippable six-bit code the host actually set. There is NO real 0x40
+ * "3 dB tolerance" bit — that rev3 notion was wrong (0x40 is not
+ * round-trippable), so it is not surfaced. Returns DIAG_U8_NA on GET failure. */
+PRIVATE uint8 u8DiagTxPowerSixBit(void)
 {
     uint32 u32TxPower = 0;
 
     if (eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32TxPower) == PHY_ENUM_SUCCESS)
     {
-        return (uint8)(u32TxPower & 0xFFU);
+        return (uint8)(u32TxPower & PHY_PIB_TX_POWER_MASK);   /* 0x3F */
     }
     return DIAG_U8_NA;
 }
 
-/* Masked 6-bit TX power level (raw & PHY_PIB_TX_POWER_MASK). */
-PRIVATE uint8 u8DiagTxPowerLevel(uint8 u8Raw)
+/* Legacy mapped level derived from the six-bit code, using the same thresholds
+ * as the 0x8806/0x8807 wire byte1 so the two representations agree. Preserves
+ * the historical middle diagnostic byte. */
+PRIVATE uint8 u8DiagTxPowerLevel(uint8 u8SixBit)
 {
-    if (u8Raw == DIAG_U8_NA) { return DIAG_U8_NA; }
-    return (uint8)(u8Raw & PHY_PIB_TX_POWER_MASK);
+    if (u8SixBit == DIAG_U8_NA) { return DIAG_U8_NA; }
+    if (u8SixBit <= 31) { return 0; }
+    if (u8SixBit <= 39) { return 32; }
+    if (u8SixBit <= 51) { return 20; }
+    return 9;   /* six-bit level 52..63 */
 }
 
-/* Six-bit signed power code interpretation of the masked level:
- * (level & 0x20) ? level - 64 : level. This is the raw signed six-bit code,
- * NOT an exact radiated/effective dBm figure (the closed PHY exposes no exact
+/* Truthful signed interpretation of the six-bit two's-complement code:
+ * (six & 0x20) ? six - 64 : six. This is the raw signed six-bit code, NOT an
+ * exact radiated/effective dBm figure (the closed PHY exposes no exact
  * raw->dBm table). */
-PRIVATE int8 i8DiagTxPowerSignedCode(uint8 u8Level)
+PRIVATE int8 i8DiagTxPowerSignedCode(uint8 u8SixBit)
 {
-    if (u8Level == DIAG_U8_NA) { return (int8)0x80; }  /* NA sentinel */
-    if (u8Level & 0x20U)       { return (int8)((int)u8Level - 64); }
-    return (int8)u8Level;
+    if (u8SixBit == DIAG_U8_NA) { return (int8)0x80; }  /* NA sentinel */
+    if (u8SixBit & 0x20U)       { return (int8)((int)u8SixBit - 64); }
+    return (int8)u8SixBit;
 }
 
 /* Count used neighbour-table entries (address below the broadcast sentinels). */
@@ -247,10 +255,9 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     uint8         u8NbUsed = 0, u8NbTotal = 0;
     uint8         u8RtUsed = 0, u8RtTotal = 0;
     uint8         u8GrUsed = 0, u8GrTotal = 0;
-    uint8         u8TxRaw;
+    uint8         u8TxSixBit;
     uint8         u8TxLevel;
     uint8         u8DiagFlags = 0;
-    uint8         au8Tclk[sizeof(TCLKDIAG_tsState)];
     uint8         u8TclkCb, u8TclkAddRepl, u8TclkCred;
 
     if (u16Len != 0)
@@ -269,26 +276,19 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     vDiagNeighbourUsage(psNib, &u8NbUsed, &u8NbTotal);
     vDiagRouteUsage(psNib, &u8RtUsed, &u8RtTotal);
     vDiagGroupUsage(psGroup, &u8GrUsed, &u8GrTotal);
-    u8TxRaw = u8DiagTxPowerRaw();
-    u8TxLevel = u8DiagTxPowerLevel(u8TxRaw);
+    u8TxSixBit = u8DiagTxPowerSixBit();
+    u8TxLevel = u8DiagTxPowerLevel(u8TxSixBit);
 
-    /* TCLK summary via the same odd/even snapshot protocol used by 0x0D00.
-     * If no stable snapshot is available, flag it and emit NA sentinels rather
-     * than reading the mid-update volatile state directly. Offsets match the
-     * fixed TCLKDIAG_tsState ABI (0x18 status, 0x1b add/replace, 0x1c cred). */
-    if (TCLKDIAG_bSnapshot(au8Tclk))
-    {
-        u8TclkCb      = au8Tclk[0x18];
-        u8TclkAddRepl = au8Tclk[0x1b];
-        u8TclkCred    = au8Tclk[0x1c];
-    }
-    else
-    {
-        u8DiagFlags  |= DIAG_GENDIAG_FLAG_TCLK_UNAVAILABLE;
-        u8TclkCb      = DIAG_U8_NA;
-        u8TclkAddRepl = DIAG_U8_NA;
-        u8TclkCred    = DIAG_U8_NA;
-    }
+    /* TCLK summary: the TCLK diagnostic subsystem (crypto-path --wrap
+     * interposition + full internal security-state export) has been REMOVED as
+     * security-sensitive. These three fields are retained in the 0x0D1F wire
+     * layout for backward compatibility but are now always NA, and the
+     * TCLK_UNAVAILABLE flag is always asserted so the host can distinguish
+     * "removed" from a transient snapshot miss. */
+    u8DiagFlags  |= DIAG_GENDIAG_FLAG_TCLK_UNAVAILABLE;
+    u8TclkCb      = DIAG_U8_NA;
+    u8TclkAddRepl = DIAG_U8_NA;
+    u8TclkCred    = DIAG_U8_NA;
 
     /* Header */
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_RSP_VERSION,  u8Length );
@@ -325,11 +325,13 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], PDUM_u8GetNpduUse(), u8Length );
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8GetApduUse(),      u8Length );
 
-    /* TX power: full PIB byte, masked 6-bit level, six-bit signed power code.
-     * The signed code is NOT an exact radiated dBm value. */
-    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxRaw,     u8Length );
+    /* rev4 TX power: canonical six-bit code (GET & 0x3F), legacy mapped level,
+     * signed six-bit code. The six-bit code is round-trippable; the signed
+     * code is NOT an exact radiated dBm value. (rev3 exposed a phantom full
+     * PIB byte with a bogus 0x40 tolerance bit — removed.) */
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxSixBit,  u8Length );
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxLevel,   u8Length );
-    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i8DiagTxPowerSignedCode(u8TxLevel), u8Length );
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i8DiagTxPowerSignedCode(u8TxSixBit), u8Length );
 
     /* PDM occupancy / wear (safe, read-only) */
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], PDM_u8GetSegmentCapacity(),  u8Length );

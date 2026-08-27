@@ -221,7 +221,6 @@ APPSRC += SerialLink.c
 APPSRC += uart.c
 APPSRC += pdum_apdu.S
 APPSRC += app_ota_server.c
-APPSRC += tclk_diagnostic.c
 APPSRC += custom_diag.c
 ifeq ($(JENNIC_CHIP_FAMILY),JN517x)
 APPSRC += AHI_ModuleConfiguration.c
@@ -252,13 +251,6 @@ APPSRC += pdm_external_memory.c
 endif
 
 LIBNAME = $(TARGET)_PDM$(PDM_BUILD_TYPE)_BAUD_$(BAUD)_DEBUG_$(DEBUG)
-
-# Link-time interposition for read-only TCLK diagnostics. No library member is
-# modified and every wrapper returns the original value unchanged.
-LDFLAGS += -Wl,--wrap=zps_eAplApsmeConfirmKeyReqRsp
-LDFLAGS += -Wl,--wrap=ZPS_u16NwkNibFindNwkAddr
-LDFLAGS += -Wl,--wrap=zps_eAplSecEncryptPacket
-LDFLAGS += -Wl,--wrap=zps_vGenerateHashForVerifiedKey
 
 
 ###############################################################################

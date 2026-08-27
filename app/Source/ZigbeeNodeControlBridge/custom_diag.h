@@ -43,9 +43,15 @@
  *
  * 1.1 revises paginated responses (7-byte prefix with an explicit next_index
  * cursor) and adds a physical table index to each group-list row, so it is not
- * wire-compatible with the never-released 1.0 draft. */
+ * wire-compatible with the never-released 1.0 draft.
+ *
+ * 1.2 (rev4) changes TX-power wire semantics: the stock 0x8806/0x8807 first
+ * application byte and the custom general-diag (0x0D1F/0x8D1F) TX-power fields
+ * now carry the canonical SIX-BIT code (GET & 0x3F) instead of the rev3 full
+ * PIB byte with a phantom 0x40 tolerance bit, and SET rejects non-round-
+ * trippable codes. Hosts must treat this as a wire-observable change. */
 #define DIAG_PROTO_MAJOR                (1U)
-#define DIAG_PROTO_MINOR                (1U)
+#define DIAG_PROTO_MINOR                (2U)
 
 /* Explicit deterministic build revision. MUST be incremented whenever the
  * implementation changes in a way that should be observable through the
@@ -59,8 +65,19 @@
  *          PIB raw value (0x00..0x40) instead of the 6-bit masked level, so a
  *          valid raw of 0x40 is echoed intact; the second byte remains the
  *          legacy mapped value from the masked level. Custom general-diag TX
- *          fields (full raw / masked level / signed code) already matched. */
-#define DIAG_BUILD_REVISION             (3U)
+ *          fields (full raw / masked level / signed code) already matched.
+ *   rev 4: rev3 TX semantics CORRECTED per HIL + MiniMac disassembly. 0x40 is
+ *          NOT round-trippable (SET sign-extends low 6 bits to 0; GET returns a
+ *          sign-extended i8). Canonical semantics: SET accepts only exact non-
+ *          clamping codes 0x00..0x0A and 0x20..0x3F and rejects 0x0B..0x1F and
+ *          0x40+; the 0x8806/0x8807 byte0 is now GET & 0x3F (canonical six-bit
+ *          code) with byte1 the legacy mapped level; general-diag TX fields are
+ *          [six-bit code][legacy level][signed six-bit code]. Also: the 0x0D00
+ *          TCLK diagnostic feature (crypto-path --wrap interposition + internal
+ *          security-state export) was REMOVED as security-sensitive; the three
+ *          general-diag TCLK bytes are now always NA with TCLK_UNAVAILABLE set.
+ *          Green Power coordinator RAM footprint reduced. */
+#define DIAG_BUILD_REVISION             (4U)
 
 /* Per-request structure version accepted by every request handler. */
 #define DIAG_REQ_VERSION                (1U)

@@ -251,16 +251,28 @@ PRIVATE void vAPP_AHISetTxPower(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, 
         u32BytesRead += sizeof(u8TxPower);
 
         /*
-         * Validate against the supported PHY encoding using the SDK macro. The
-         * selected MiniMac shim defines PHY_PIB_TX_POWER_MAX = 0x40 (the 3 dB
-         * tolerance code IS a valid setting), so 0x40 must NOT be rejected. The
-         * authoritative acceptance is the eAppApiPlmeSet result; the range
-         * check simply rejects clearly out-of-range codes before the PIB write.
-         * On rejection the outer dispatch still emits the stock
-         * E_SL_MSG_STATUS frame and omits the value frame, so the existing
-         * wire response shape is unchanged.
+         * rev4 canonical TX-power SET validation.
+         *
+         * Established by physical HIL + MiniMac disassembly: in the linked
+         * MiniMac path the TX-power PIB is a 6-bit two's-complement code. The
+         * hardware only round-trips the exact codes it can represent; several
+         * inputs are silently mangled and MUST be rejected rather than
+         * accepted-then-clamped:
+         *
+         *   - 0x00..0x0A : accepted, positive levels 0..10 (round-trips).
+         *   - 0x0B..0x1F : REJECTED (not exactly representable; would clamp).
+         *   - 0x20..0x3F : accepted, 6-bit negatives -32..-1 (round-trips).
+         *   - 0x40 and above : REJECTED. 0x40 is NOT round-trippable: SET
+         *                      sign-extends the low 6 bits to 0, and GET then
+         *                      returns a sign-extended i8, so the value written
+         *                      cannot be read back. (Older rev3 code accepted
+         *                      up to PHY_PIB_TX_POWER_MAX/0x40 — that was wrong.)
+         *
+         * Only exact, non-clamping codes are accepted. On rejection the outer
+         * dispatch still emits the stock E_SL_MSG_STATUS frame and omits the
+         * value frame, so the failed-set wire shape is unchanged (status only).
          */
-        if (u8TxPower <= PHY_PIB_TX_POWER_MAX)
+        if (u8TxPower <= 0x0A || (u8TxPower >= 0x20 && u8TxPower <= 0x3F))
         {
             if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS)
             {

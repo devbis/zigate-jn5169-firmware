@@ -79,7 +79,6 @@
 #include "PDM_IDs.h"
 #include "ApplianceStatistics.h"
 #include "bdb_DeviceCommissioning.h"
-#include "tclk_diagnostic.h"
 #include "custom_diag.h"
 
 //FRED IASWD
@@ -410,26 +409,32 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                     bEmitValue = (u8CmdStatus == E_AHI_SUCCESS);
                 }
                 // Only return value if command succeed.
-                // TX power value range is 0x00-0x40 (MiniMac) so uint8 is big enough
                 if ( bEmitValue )
                 {
                     /*
-                     * Preserve the stock two-application-byte response SHAPE
-                     * (vSL_WriteMessage appends the LQI byte). Byte 0 is the
-                     * FULL PIB raw value (0x00..0x40) so 0x40 is echoed intact
-                     * and an exact raw restore/echo is possible; byte 1 is the
-                     * legacy mapped value computed from the masked 6-bit level.
+                     * rev4 canonical TX-power GET response.
+                     *
+                     * Byte 0 is the canonical SIX-BIT code (GET & 0x3F). Per the
+                     * HIL + MiniMac disassembly the PIB is a 6-bit two's-
+                     * complement value and the raw i8 GET is sign-extended (e.g.
+                     * code -8 reads back as 0xFFFFFFF8); masking to 0x3F yields
+                     * the canonical, round-trippable six-bit code the host set.
+                     * (rev3 echoed the full raw low byte incl. the phantom 0x40
+                     * bit — that was not round-trippable and is corrected here.)
+                     *
+                     * Byte 1 is the legacy mapped level, computed from the same
+                     * six-bit code, preserving the historical wire shape (two
+                     * application bytes; vSL_WriteMessage appends the LQI byte).
                      */
-                    uint8 u8TXrawFull   = (uint8)(u32AHIresponse & 0xFFU);
-                    uint8 u8TXlevelMask = u8TXrawFull & PHY_PIB_TX_POWER_MASK;
+                    uint8 u8TXsixBit = (uint8)(u32AHIresponse & PHY_PIB_TX_POWER_MASK); /* 0x3F */
                     uint8 u8TXlevel;
-                    if (u8TXlevelMask <= 31) { u8TXlevel = 0; }
-                    else if (u8TXlevelMask <= 39) { u8TXlevel = 32; }
-                    else if (u8TXlevelMask <= 51) { u8TXlevel = 20; }
-                    else { u8TXlevel = 9; }   /* masked level is 6-bit: 52..63 */
+                    if (u8TXsixBit <= 31) { u8TXlevel = 0; }
+                    else if (u8TXsixBit <= 39) { u8TXlevel = 32; }
+                    else if (u8TXsixBit <= 51) { u8TXlevel = 20; }
+                    else { u8TXlevel = 9; }   /* six-bit level is 52..63 */
 
                     u8Length = 0;
-                    ZNC_BUF_U8_UPD  ( &au8values[ 0 ], u8TXrawFull,    u8Length );
+                    ZNC_BUF_U8_UPD  ( &au8values[ 0 ], u8TXsixBit,     u8Length );
                     ZNC_BUF_U8_UPD  ( &au8values[ 1 ], u8TXlevel,      u8Length );
                     vSL_WriteMessage ( u16ResponseCode,
                                        u8Length,
@@ -497,16 +502,17 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
 
             case (E_SL_MSG_GET_TCLK_DIAGNOSTIC):
             {
-                uint8 au8Diagnostic[sizeof(TCLKDIAG_tsState) + 1];
-
-                if (u16PacketLength != 0)
-                {
-                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
-                }
-                else if (!TCLKDIAG_bSnapshot(au8Diagnostic))
-                {
-                    u8Status = E_SL_MSG_STATUS_BUSY;
-                }
+                /* SECURITY: the TCLK diagnostic feature (full internal
+                 * TCLK/APS-security negotiation-state snapshot export + the
+                 * link-time --wrap interposition of ConfirmKey / EncryptPacket
+                 * / GenerateHashForVerifiedKey / FindNwkAddr) has been REMOVED.
+                 * It exported no raw key bytes, but instrumenting the crypto
+                 * path and surfacing the internal security state machine over
+                 * UART is security-sensitive. The command now returns the
+                 * generic "unhandled" status so any host is backward-compatibly
+                 * told the feature is unavailable. See custom_diag.c (0x0D1F
+                 * TCLK fields forced to NA) and the removed tclk_diagnostic.*. */
+                u8Status = E_SL_MSG_STATUS_UNHANDLED_COMMAND;
 
                 ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8Status,      u8Length );
                 ZNC_BUF_U8_UPD  ( &au8values[ u8Length ], u8SeqNum,      u8Length );
@@ -520,13 +526,6 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                                  u8Length,
                                  au8values,
                                  0);
-                if (u8Status == E_SL_MSG_STATUS_SUCCESS)
-                {
-                    vSL_WriteMessage(E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE,
-                                     sizeof(TCLKDIAG_tsState),
-                                     au8Diagnostic,
-                                     0);
-                }
                 return;
             }
             break;
@@ -3987,14 +3986,8 @@ PUBLIC bool APP_bSendHATransportKey ( uint16    u16ShortAddress,
 {
     bool_t          bStatus     =  TRUE;
     ZPS_teStatus    eStatus;
-    uint16          u16Location = TCLK_DIAGNOSTIC_U16_NA;
+    uint16          u16Location = 0xFFFFU;
     bool_t          bCredPresent =  FALSE;
-
-    TCLKDIAG_vCallbackBegin(u16ShortAddress,
-                            u64DeviceAddress,
-                            u8Status,
-                            u16Mac,
-                            bSetTclkFlashFeature);
 
     if( bBlackListEnable )
     {
@@ -4044,7 +4037,6 @@ PUBLIC bool APP_bSendHATransportKey ( uint16    u16ShortAddress,
 		uint8 au8Key[16] = { 0x5a, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41,
 								  0x6c, 0x6c, 0x69, 0x61, 0x6e, 0x63, 0x65, 0x30, 0x39 };
 
-        TCLKDIAG_vInsertionAttempted();
 		eStatus = ZPS_eAplZdoAddReplaceLinkKey( u64DeviceAddress,
                                                au8Key,
                                                ZPS_APS_UNIQUE_LINK_KEY);
@@ -4054,7 +4046,6 @@ PUBLIC bool APP_bSendHATransportKey ( uint16    u16ShortAddress,
                                                &u16Location,
                                                FALSE,
                                                FALSE);
-        TCLKDIAG_vInsertionResult(eStatus, bCredPresent, u16Location);
 		/*If credential is present roll back to confirm that key is used and not install code */
 		/*if(bCredPresent)
 		{
@@ -4063,7 +4054,6 @@ PUBLIC bool APP_bSendHATransportKey ( uint16    u16ShortAddress,
         bStatus = TRUE;
     }
 
-    TCLKDIAG_vCallbackEnd(bStatus);
     return bStatus;
 }
 

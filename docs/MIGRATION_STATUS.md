@@ -17,9 +17,17 @@ The requested image **compiles and links**:
 WWAH=0). Two clean builds are **byte-identical** (`.bin` and `.elf`):
 
 ```
-bin sha256 7a878ca67e374596faed8392f12e0ad514d3d43377dd0ee9286f6121c4bcdafd
-elf sha256 872b6d5d7e522367a4a6b4e38ef0d2dd4079dccc0715f4bf9b8860d7acb074c2
+bin sha256 0f314f98072527c861627ba767d23cc24188b5ebf310553964a40648614c1b9c
+elf sha256 4b5ef213ad7567a8b181dd51bf420e84cd7d6e8de1f1ebd9c148b24c203e14f7
+text=252612  data=2028  bss=30161
+RAM headroom = 0x7fb4 - (_minimum_heap_end 0x664c + __stack_size 0x1770)
+             = 32692 - 32188 = 504 bytes
 ```
+
+(Hashes above are for **proto 1.2 / build rev 4** — rev4 TX-power semantics +
+TCLK 0x0D00 removal. The previous rev3 image was
+`bin 7a878ca6… / elf 872b6d5d…`, text=253416 data=2096 bss=30157; rev4 removed
+804 B of flash text and 68 B of `.data` by deleting the TCLK subsystem.)
 
 Determinism is pinned by `scripts/build.sh` (`LC_ALL=C`, `TZ=UTC`,
 `SOURCE_DATE_EPOCH`). Both Blocker A and Blocker B are resolved; the validated
@@ -32,8 +40,32 @@ The stock GP-proxy coordinator `.zpscfg` shipped `RoutingTableSize="255"`
 (a 3060-byte route table) which overflowed SRAM by 1428 B at link
 (`ASSERT ... "Possible overflow of RAM"`). It was right-sized to `70` to match
 the four sibling coordinator `.zpscfg` variants in this tree, recovering
-2208 B of BSS. Current headroom is small (~0.5 KB); new features that add BSS
+2208 B of BSS. Current headroom is small (**504 B**); new features that add BSS
 must be checked against the link-time RAM assert.
+
+### Green Power RAM reduction — evaluated, capacities preserved
+
+The correction asked to reduce GP RAM per OpenLumi master `a0beb6f` "Reduce
+Green Power coordinator RAM usage" **if safely possible, without silently
+lowering documented capacities**. Findings:
+
+- This target builds as `GP_PROXY_BASIC_DEVICE` (not `GP_COMBO_BASIC_DEVICE`),
+  so the 1320-byte translation table (`asGpTranslationTable[5]`, guarded by
+  `#ifdef GP_COMBO_BASIC_DEVICE`) is **already excluded** from this image.
+- The remaining GP RAM is the combined proxy/sink table
+  `sGPDeviceInfo…asZgpsSinkProxyTable[GP_NUMBER_OF_PROXY_SINK_TABLE_ENTRIES=5]`
+  and the generated GP security table / TX queue (`.zpscfg`
+  `GreenPowerSecurityTable Size="5"`, `GreenPowerTxQueue Size="5"`). These are
+  the **documented operational capacities** (5 proxied GPDs / 5 security
+  entries / 5 queued frames). Reducing them lowers documented capacity, which
+  the correction forbids.
+- The `a0beb6f` diff cannot be fetched (no network access) to reproduce a
+  capacity-neutral reduction verbatim, and inventing table shrinks would breach
+  the "do not silently lower documented capacities" constraint.
+- **Net:** GP capacities are left intact. RAM/flash was instead reclaimed by
+  removing the security-sensitive TCLK 0x0D00 subsystem (−68 B `.data`,
+  −804 B text). This item is documented as deliberately deferred rather than
+  applied blind.
 
 ## What works today (baseline established)
 
@@ -145,26 +177,52 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 ## Patch series application  [APPLIED]
 
 `patches/0100-custom-diagnostic-protocol.patch` is the comprehensive, final
-snapshot (TCLK 0x0D00, capability negotiation, local neighbour/route/group
-tables, general diag, canonical TX-power rev3, `SerialLink.h`,
+snapshot (capability negotiation, local neighbour/route/group
+tables, general diag, canonical TX-power, `SerialLink.h`,
 `app_ahi_commands.c`, `app_zcl_event_handler.c`). It was applied with
 `patch -p5` from `app/` (path prefix `ModuleRadio/Firmware/src/ZiGate/` →
-`app/`). It adds `tclk_diagnostic.c` / `custom_diag.c` to the app `Makefile`
-plus the four read-only `--wrap` link flags, reconciled with the overlay's
-existing `APPSRC`/`INCFLAGS`/`vpath` additions.
+`app/`), then the rev4 correction (below) removed the TCLK 0x0D00 subsystem it
+had introduced. It adds `custom_diag.c` to the app `Makefile`, reconciled with
+the overlay's existing `APPSRC`/`INCFLAGS`/`vpath` additions.
 
 `patches/0080-*` and `patches/0090-*` are **superseded earlier iterations**
 (each recreates `tclk_diagnostic.{c,h}` from scratch); they are retained under
 `patches/` for provenance only and are **not** applied. `0001-build-
 reproducibility.patch` is already reflected in `scripts/build.sh`.
 
-## Diagnostic ABI notes carried forward (unchanged semantics)
+## Diagnostic ABI — proto 1.2 / build rev 4
 
-- Protocol **1.1**; capability response `0x8D0F`; read-only TCLK wrappers via
-  `-Wl,--wrap` (no library member modified).
-- **Canonical TX-power semantics (rev3):** `0x8806`/`0x8807` return
-  `byte0 = full PIB raw (0x00..0x40)`, `byte1 = legacy mapped value` from
-  `raw & 0x3f`, then the appended LQI byte. Hosts must not re-mask byte0.
+- Protocol **1.2**, build **rev 4**; capability response `0x8D0F`.
+- **Canonical TX-power semantics (rev4)** — corrected from rev3 per the
+  physical HIL + MiniMac disassembly: in the linked MiniMac path **0x40 is NOT
+  round-trippable** (SET sign-extends the low 6 bits to 0; GET returns a
+  sign-extended i8, e.g. code −8 reads back as `0xFFFFFFF8`). Therefore:
+  - **SET** (`app_ahi_commands.c`) accepts only exact non-clamping codes
+    `0x00..0x0A` (positive 0..10) and `0x20..0x3F` (6-bit two's-complement
+    −32..−1); it **rejects** `0x0B..0x1F` and `0x40`+. A rejected SET emits the
+    stock status frame only, no value frame.
+  - **`0x8806`/`0x8807`** (`app_Znc_cmds.c`) return `byte0 = GET & 0x3F` (the
+    canonical six-bit code) and `byte1 = legacy mapped level` derived from that
+    six-bit code, then the appended LQI byte. (rev3 wrongly echoed the full
+    raw low byte incl. the phantom 0x40 bit.)
+  - **General diag** (`0x0D1F`) TX fields are `[six-bit code][legacy level]
+    [signed six-bit code]`, where signed = `(six & 0x20) ? six-64 : six`. All
+    truthful; no phantom 0x40.
+  - Wire shapes are byte-length-stable; only the byte *values*/validation
+    changed, hence the proto-minor + build-rev bump (host validator must move
+    to 1.2 / rev 4).
+- **TCLK 0x0D00 diagnostic REMOVED** (security-sensitive). The feature exported
+  the full internal TCLK/APS-security negotiation state over UART and
+  interposed four ZPS crypto functions via `-Wl,--wrap`
+  (`zps_eAplApsmeConfirmKeyReqRsp`, `zps_eAplSecEncryptPacket`,
+  `zps_vGenerateHashForVerifiedKey`, `ZPS_u16NwkNibFindNwkAddr`). It exported no
+  raw key/hash bytes and did no PDM restore, but instrumenting the crypto path
+  and surfacing the internal security state machine is security-sensitive, so
+  `tclk_diagnostic.{c,h}`, the four `--wrap` link flags, the 0x0D00 handler and
+  all four instrumentation call sites were deleted. The `0x0D00` request ID is
+  retained as reserved and now replies `0x8000` status "unhandled". The three
+  general-diag TCLK bytes are retained in the 0x0D1F layout but are now always
+  `NA` with `DIAG_GENDIAG_FLAG_TCLK_UNAVAILABLE` asserted.
 
 ## Validated safety fixes  [DONE]
 
