@@ -1,0 +1,22 @@
+# Python venv used only to run the SDK ZPS/PDUM generators
+/.venv/
+
+# Generated ZPS/PDUM sources (produced from *.zpscfg by the SDK tools)
+app/Source/ZigbeeNodeControlBridge/pdum_gen.c
+app/Source/ZigbeeNodeControlBridge/pdum_gen.h
+app/Source/ZigbeeNodeControlBridge/pdum_apdu.S
+app/Source/ZigbeeNodeControlBridge/zps_gen.c
+app/Source/ZigbeeNodeControlBridge/zps_gen.h
+app/Source/ZigbeeNodeControlBridge/zps_gen_*.c
+
+# Build outputs
+*.o
+*.d
+*.a
+*.elf
+*.bin
+*.map
+app/Doc/size.txt
+
+# macOS
+.DS_Store
