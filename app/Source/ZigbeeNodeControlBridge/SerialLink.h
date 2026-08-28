@@ -126,6 +126,14 @@ typedef enum
      * mutation. See custom_diag.c and docs/DIAGNOSTIC_ABI_MANUFACTURER_CODE.md. */
     E_SL_MSG_MANUFACTURER_CODE_REQ                             =   0x0D16,
     E_SL_MSG_MANUFACTURER_CODE_RSP                             =   0x8D16,
+    /* Negotiated local Green Power proxy commissioning window. Advertised via
+     * capability bit 1<<3 only when the handler is compiled in (CLD_GREENPOWER).
+     * The firmware drives the SDK GP proxy commissioning state machine on the
+     * locally mapped GP endpoint (GREENPOWER_END_POINT_ID) towards APS endpoint
+     * 242; hosts must NOT emulate this with a raw 0x0530 unicast to 0xFFFC.
+     * See custom_diag.c and docs/DIAGNOSTIC_ABI_GREEN_POWER.md. */
+    E_SL_MSG_GP_COMMISSION_REQ                                 =   0x0D17,
+    E_SL_MSG_GP_COMMISSION_RSP                                 =   0x8D17,
     E_SL_MSG_GENERAL_DIAG_REQ                                  =   0x0D1F,
     E_SL_MSG_GENERAL_DIAG_RSP                                  =   0x8D1F,
 

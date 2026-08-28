@@ -17,6 +17,7 @@
  *     - Paginated local route table      (0x0D15 / 0x8D15)
  *     - Local APS group operation        (0x0D12 / 0x8D12)
  *     - Local APS group paginated list   (0x0D13 / 0x8D13)
+ *     - Local GP proxy commissioning     (0x0D17 / 0x8D17)
  *
  *   All wire fields are serialised individually in big-endian order using the
  *   ZNC_BUF_* macros. No C structure is ever cast onto the wire, so the wire
@@ -66,21 +67,98 @@
  *          valid raw of 0x40 is echoed intact; the second byte remains the
  *          legacy mapped value from the masked level. Custom general-diag TX
  *          fields (full raw / masked level / signed code) already matched.
+ *          (Superseded from rev6: see the rev6 note on the deliberate 0x8D1F
+ *          vs 0x8806/0x8807 byte1 divergence.)
  *   rev 4: rev3 TX semantics CORRECTED per HIL + MiniMac disassembly. 0x40 is
  *          NOT round-trippable (SET sign-extends low 6 bits to 0; GET returns a
  *          sign-extended i8). Canonical semantics: SET accepts only exact non-
  *          clamping codes 0x00..0x0A and 0x20..0x3F and rejects 0x0B..0x1F and
  *          0x40+; the 0x8806/0x8807 byte0 is now GET & 0x3F (canonical six-bit
  *          code) with byte1 the legacy mapped level; general-diag TX fields are
- *          [six-bit code][legacy level][signed six-bit code]. Also: the 0x0D00
+ *          [six-bit code][six-bit code][signed six-bit code]. Also: the 0x0D00
  *          TCLK diagnostic feature (crypto-path --wrap interposition + internal
  *          security-state export) was REMOVED as security-sensitive; the three
  *          general-diag TCLK bytes are now always NA with TCLK_UNAVAILABLE set.
  *          Green Power coordinator RAM footprint reduced.
  *   rev 5: advertise Green Power commissioning only in builds that actually
  *          include CLD_GREENPOWER. This is an additive capability bit; the
- *          1.2 wire structures and command encodings are unchanged. */
-#define DIAG_BUILD_REVISION             (5U)
+ *          1.2 wire structures and command encodings are unchanged.
+ *   rev 6: make the general-diagnostics TX level match the canonical MiniMac
+ *          PIB code already returned by TX GET. The protocol 1.2 layout and
+ *          command encodings are unchanged.
+ *          NOTE - this makes the 0x8D1F and 0x8806/0x8807 TX byte1 fields
+ *          DIVERGE, deliberately and permanently:
+ *            0x8D1F  byte0/byte1 = canonical raw six-bit register code
+ *                    (GET & 0x3F), byte2 = signed six-bit code.
+ *            0x8806/0x8807  byte0 = same six-bit code, byte1 = LEGACY MAPPED
+ *                    level from the threshold ladder in app_Znc_cmds.c
+ *                    (<=31 -> 0, <=39 -> 32, <=51 -> 20, else 9).
+ *          rev4's note that the general-diag fields "already matched" the
+ *          legacy mapping describes rev3/rev4 and is NO LONGER true for
+ *          byte1 from rev6 onwards. The divergence is intentional: 0x8D1F is
+ *          the canonical register view for diagnostics, 0x8806/0x8807 keep the
+ *          legacy ZiGate semantics deployed hosts already parse. Neither is
+ *          changed for the sake of consistency with the other; hosts key the
+ *          0x8D1F interpretation off build revision >= 6.
+ *   rev 7: add the negotiated Green Power proxy commissioning command
+ *          (0x0D17/0x8D17). Capability bit 1<<3 is unchanged in value but is
+ *          now asserted only when this handler is compiled in, so hosts that
+ *          see the bit can rely on the command instead of an unmanaged raw
+ *          0x0530 APS broadcast (which the rev6 HIL rejected with
+ *          ZPS_APL_APS_E_NO_ACK, 0xA6). Additive, capability-gated ABI: the
+ *          1.2 wire structures and every pre-existing command encoding are
+ *          unchanged.
+ *   rev 8: add an explicit per-request transaction id to the Green Power
+ *          proxy commissioning command only (0x0D17 request 3 -> 7 bytes,
+ *          0x8D17 response 5 -> 9 bytes). The superseded first rev8 draft
+ *          used a one-byte transaction id and 4/6-byte wire structures; the
+ *          final ABI uses a big-endian uint32 transaction id. The rev7
+ *          encoding carried no
+ *          correlation field, so a late 0x8D17 from a host request that had
+ *          already timed out was structurally indistinguishable from the
+ *          answer to the NEXT request and could be consumed by it, reporting
+ *          a stale window state as the current one. The firmware now echoes
+ *          the request's transaction id in every response it emits for a
+ *          structurally valid request, so the host can reject anything it did
+ *          not ask for. Protocol stays 1.2: 0x0D17/0x8D17 were introduced in
+ *          rev7 and are gated behind capability bit 1<<3, so no shipped host
+ *          can be using the rev7 encoding without re-negotiating the build id
+ *          first. Every other command encoding is unchanged.
+ *   rev 9: restore the endpoint-1 raw-NCP transmit allowlist after physical
+ *          HIL. No wire format, command encoding or capability bit changes;
+ *          this revision exists only so a host can tell, from the build id,
+ *          whether the image it is talking to can originate the affected
+ *          clusters at all. The rev6 descriptor pruning treated endpoint 1's
+ *          OutputClusters as pure ZCL advertisement and removed every cluster
+ *          without a local client instance. HIL shows the ZPS APS layer also
+ *          uses that same list as the allowlist for RAW, host-originated
+ *          transmissions (serial 0x0530): a Basic 0x0000 read succeeds only
+ *          because Basic survived the pruning, while a Power Configuration
+ *          0x0001 read or configure-reporting is rejected LOCALLY by the
+ *          JN5169 with APS status 0xA3 (ZPS_APL_APS_E_ILLEGAL_REQUEST) before
+ *          anything reaches the air. In an NCP the output-cluster list is
+ *          therefore a truthful statement of what the host+NCP pair can
+ *          originate, not a claim about firmware-resident ZCL clients, so
+ *          rev9 re-adds the clusters the hub legitimately originates
+ *          (Power Configuration, Multistate Input, OTA, Thermostat UI
+ *          configuration, Illuminance Level Sensing, Pressure, Occupancy,
+ *          Electrical Measurement). This is descriptor-only: const/flash,
+ *          no new ZCL instances, no RAM.
+ *          rev9 additionally makes the endpoint-1 Time server (cluster 0x000A)
+ *          READ-ONLY OVER ZIGBEE. Registering that server for network reads
+ *          also exposed a network WRITE path, because ZclTime.h marks
+ *          Time/TimeStatus E_ZCL_AF_WR and the ZCL core clamps the cluster's
+ *          E_ZCL_SECURITY_APPLINK requirement down to E_ZCL_SECURITY_NETWORK
+ *          in this build; any node holding only the network key could have
+ *          rewritten the clock the host reads back over 0x0017. Remote ZCL
+ *          Write Attributes to 0x000A are now refused with ZCL status 0x7e
+ *          NOT_AUTHORIZED before the attribute is modified, in raw mode too.
+ *          Host SET/GET (0x0016/0x0017) and the 1 Hz increment are unchanged;
+ *          this touches no host wire encoding, no capability bit and no
+ *          protocol field, so it did not warrant a rev10 - and rev9 was never
+ *          flashed or published, so it was folded in place exactly as the
+ *          superseded rev8 draft was. */
+#define DIAG_BUILD_REVISION             (9U)
 
 /* Per-request structure version accepted by every request handler. */
 #define DIAG_REQ_VERSION                (1U)
@@ -106,7 +184,18 @@
 #define DIAG_CAP_BIT_MANUFCODE          (((uint64)1U) << 10)
 #define DIAG_CAP_BIT_DIAGNOSTICS        (((uint64)1U) << 14)
 
+/* Green Power proxy commissioning (0x0D17/0x8D17) is built only when the GP
+ * cluster itself is compiled in. DIAG_HAVE_GP_COMMISSIONING is the single
+ * switch: it gates the handler prototype, the handler body in custom_diag.c,
+ * the SerialLink dispatch case in app_Znc_cmds.c AND the advertised capability
+ * bit, so the bit can never be advertised by a build that lacks the handler.
+ * (rev5 gated only the bit on CLD_GREENPOWER while no handler existed at all;
+ * hosts therefore fell back to a raw, unmanaged 0x0530 APS broadcast.) */
 #ifdef CLD_GREENPOWER
+#define DIAG_HAVE_GP_COMMISSIONING      (1)
+#endif
+
+#ifdef DIAG_HAVE_GP_COMMISSIONING
 #define DIAG_CAP_GP_BITMAP              DIAG_CAP_BIT_GP_COMMISSIONING
 #else
 #define DIAG_CAP_GP_BITMAP              (((uint64)0U))
@@ -241,6 +330,56 @@
  * descriptor is unavailable at the first call. */
 #define DIAG_MANUF_CODE_SHIPPED_DEFAULT (0x1147U)
 
+/* Green Power proxy commissioning window (0x0D17 / 0x8D17).
+ *
+ * Request  (exactly DIAG_GP_COMMISSION_REQ_LEN bytes, no optional fields):
+ *   version[1]  transaction_id[4, big-endian]  action[1]  timeout_seconds[1]
+ *     version         MUST be DIAG_REQ_VERSION.
+ *     transaction_id  host-chosen correlation tag, any 32-bit value, encoded
+ *                     big-endian like the 0x0D0F capability nonce. The
+ *                     firmware never interprets it and echoes it verbatim in
+ *                     the response emitted for this request. It is 32 bits
+ *                     wide so a host counter cannot wrap between queued
+ *                     requests and hand two in-flight transactions the same
+ *                     tag.
+ *     action          DIAG_GP_ACTION_DISABLE (0) or DIAG_GP_ACTION_ENABLE (1).
+ *     timeout_seconds MUST be 0 for DISABLE and 1..255 for ENABLE. Any other
+ *                     combination is rejected with the outer 0x8000
+ *                     E_SL_MSG_STATUS_INCORRECT_PARAMETERS and NO 0x8D17.
+ *
+ * Response (exactly DIAG_GP_COMMISSION_RSP_LEN bytes):
+ *   version[1]  transaction_id[4, big-endian]  status[1]  effective_mode[1]
+ *   effective_timeout[1]  gp_status[1]
+ *     transaction_id    verbatim echo of the request's transaction id. It is
+ *                       echoed for EVERY response emitted for a structurally
+ *                       valid request, success or Green Power failure, so the
+ *                       host can discard a late response belonging to an
+ *                       earlier, already timed-out transaction instead of
+ *                       mistaking it for the answer to the current one.
+ *     status            DIAG_GP_COMMISSION_STATUS_* (operation domain).
+ *                       DIAG_GP_COMMISSION_STATUS_OK is emitted if and only if
+ *                       gp_status is 0 (E_ZCL_SUCCESS), and
+ *                       DIAG_GP_COMMISSION_STATUS_GP_ERROR if and only if
+ *                       gp_status is non-zero.
+ *     effective_mode    proxy commissioning state AFTER the operation
+ *                       (0 = operating / closed, 1 = commissioning open).
+ *     effective_timeout seconds the local commissioning window was programmed
+ *                       with (0 when closed).
+ *     gp_status         underlying teZCL_Status from the GP cluster call
+ *                       (0 == E_ZCL_SUCCESS).
+ *
+ * The LQI byte appended by vSL_WriteMessage() is not part of these lengths. */
+#define DIAG_GP_COMMISSION_REQ_LEN      (7U)
+#define DIAG_GP_COMMISSION_RSP_LEN      (9U)
+#define DIAG_GP_ACTION_DISABLE          (0U)
+#define DIAG_GP_ACTION_ENABLE           (1U)
+#define DIAG_GP_TIMEOUT_MIN             (1U)
+#define DIAG_GP_TIMEOUT_MAX             (255U)
+#define DIAG_GP_MODE_OPERATING          (0U)
+#define DIAG_GP_MODE_COMMISSIONING      (1U)
+#define DIAG_GP_COMMISSION_STATUS_OK        (0U)
+#define DIAG_GP_COMMISSION_STATUS_GP_ERROR  (1U)
+
 /****************************************************************************/
 /***        Sentinels                                                     ***/
 /****************************************************************************/
@@ -272,6 +411,12 @@ DIAG_STATIC_ASSERT(
 DIAG_STATIC_ASSERT(DIAG_CAP_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, cap_fits);
 DIAG_STATIC_ASSERT(DIAG_GROUP_OP_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, group_op_fits);
 DIAG_STATIC_ASSERT(DIAG_MANUF_CODE_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, manuf_rsp_fits);
+DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, gp_rsp_fits);
+/* The correlated rev8 encoding is fixed-width in both directions and carries a
+ * 32-bit transaction id (1 + 4 + 1 + 1 request, 1 + 4 + 4 response). */
+DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_REQ_LEN == 7U, gp_req_len);
+DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_RSP_LEN == 9U, gp_rsp_len);
+DIAG_STATIC_ASSERT(DIAG_GP_TIMEOUT_MAX <= 0xFFU, gp_timeout_fits_u8);
 /* The advertised endpoint-number space fits the group endpoint bitmap. */
 DIAG_STATIC_ASSERT(DIAG_GROUP_LIST_MAX_ENDPOINTS <= 242U, group_ep_cap);
 
@@ -280,7 +425,7 @@ DIAG_STATIC_ASSERT(DIAG_GROUP_LIST_MAX_ENDPOINTS <= 242U, group_ep_cap);
 /****************************************************************************/
 
 /* Each handler validates its request with strict fixed-length bounds, emits
- * the stock 7-byte E_SL_MSG_STATUS (0x8000) frame first, then, on success,
+ * the stock 8-byte E_SL_MSG_STATUS (0x8000) frame first, then, on success,
  * emits its versioned response frame. pu8Rx points at the received UART
  * payload (au8LinkRxBuffer); u16Len is the received payload length. */
 PUBLIC void CUSTOMDIAG_vHandleCapability(uint16 u16Len, const uint8 *pu8Rx);
@@ -290,5 +435,8 @@ PUBLIC void CUSTOMDIAG_vHandleRoutes(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleGroupOp(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleGroupList(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleManufCode(uint16 u16Len, const uint8 *pu8Rx);
+#ifdef DIAG_HAVE_GP_COMMISSIONING
+PUBLIC void CUSTOMDIAG_vHandleGPCommission(uint16 u16Len, const uint8 *pu8Rx);
+#endif
 
 #endif /* CUSTOM_DIAG_H_ */

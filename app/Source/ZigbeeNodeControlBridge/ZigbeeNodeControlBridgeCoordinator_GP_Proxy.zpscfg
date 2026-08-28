@@ -115,6 +115,9 @@
     <Clusters Name="Default" Id="0xFFFF"/>
     <Clusters Name="MultiStateInput" Id="0x0012"/>
     <Clusters Name="MultiStateOutput" Id="0x0013"/>
+    <Clusters Name="Time" Id="0x000A"/>
+    <Clusters Name="Window_Covering" Id="0x0102"/>
+    <Clusters Name="IAS_Warning_Device" Id="0x0502"/>
   </Profiles>
   <Profiles Name="GP" Id="0xA1E0">
     <Clusters Name="GreenPower" Id="0x0021"/>
@@ -294,53 +297,44 @@
     </Endpoints>
     <Endpoints Id="1" Enabled="true" ApplicationDeviceId="2112" ApplicationDeviceVersion="0" Profile="ZLO" Message="APP_msgZpsEvents_ZCL" Name="ZLO">
       <InputClusters Cluster="Basic" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <InputClusters Cluster="Color_Control" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Groups" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Identify" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <InputClusters Cluster="Level_Control" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="On_Off" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Scenes" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Door_Lock" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Metering" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="IASZone" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
+      <InputClusters Cluster="Groups" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <InputClusters Cluster="On_Off" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <InputClusters Cluster="OTA" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <InputClusters Cluster="Thermostat" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_ILLUMINANCE_LEVEL_SENSING" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_ILLUMINANCE_MEASUREMENT" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_OCCUPANCY_SENSING" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_PRESSURE_MEASUREMENT" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_RELATIVE_HUMIDITY_MEASUREMENT" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_TEMPERATURE_MEASUREMENT" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Power_Configuration" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Thermostat_UI" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Power_Configuration" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="ASC" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Electrical_Measurements" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="Diagnostics" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <InputClusters Cluster="ZLL_Commissioning" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
+      <InputClusters Cluster="Time" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <!-- Keep the wildcard sink used by ZiGate raw/hybrid APS forwarding. -->
       <InputClusters Cluster="Default" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
-      <OutputClusters Cluster="ASC" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <!-- Endpoint-1 OutputClusters are the ZPS APS allowlist for RAW,
+           host-originated transmissions (serial 0x0530), not just ZCL
+           advertisement: a cluster missing here is rejected locally with APS
+           0xA3 ILLEGAL_REQUEST before it reaches the air, even though no
+           firmware-resident ZCL client instance is involved. This list
+           therefore states what this host+NCP pair can originate. Adding an
+           entry costs const/flash only - do NOT add ZCL instances for it. -->
       <OutputClusters Cluster="Basic" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="Power_Configuration" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="MultiStateInput" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="OTA" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Color_Control" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Groups" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Identify" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Level_Control" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="On_Off" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Scenes" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <OutputClusters Cluster="Door_Lock" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="false"/>
+      <OutputClusters Cluster="Door_Lock" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Metering" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="IASZone" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <OutputClusters Cluster="OTA" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Thermostat" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_ILLUMINANCE_LEVEL_SENSING" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="Thermostat_UI" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_ILLUMINANCE_MEASUREMENT" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_OCCUPANCY_SENSING" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_ILLUMINANCE_LEVEL_SENSING" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_PRESSURE_MEASUREMENT" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_OCCUPANCY_SENSING" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_RELATIVE_HUMIDITY_MEASUREMENT" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="MEASUREMENT_AND_SENSING_CLUSTER_ID_TEMPERATURE_MEASUREMENT" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <OutputClusters Cluster="Thermostat_UI" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
-      <OutputClusters Cluster="Power_Configuration" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="Electrical_Measurements" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
       <OutputClusters Cluster="Diagnostics" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="Window_Covering" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
+      <OutputClusters Cluster="IAS_Warning_Device" TxAPDUs="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>
     </Endpoints>
     <Endpoints Id="242" Enabled="true" ApplicationDeviceId="97" ApplicationDeviceVersion="0" Profile="GP" Name="GreenPower">
       <InputClusters Cluster="GreenPower" RxAPDU="ZigbeeNodeControlBridge->apduZDP" Discoverable="true"/>

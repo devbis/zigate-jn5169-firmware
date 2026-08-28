@@ -109,6 +109,7 @@ APP_AHI_CONTROL        ?= 1
 CFLAGS  += -DUART_BAUD_RATE=$(BAUD)
 CFLAGS  += -D$(NODE)
 CFLAGS	+= -D$(CRC_NEW)
+CFLAGS  += -DZIGATE_CONTROL_BRIDGE_OVERLAY
 
 ifeq ($(DEBUG), UART1)
 CFLAGS  += -DDBG_ENABLE
@@ -315,6 +316,29 @@ include $(SDK_BASE_DIR)/Components/BDB/Build/config.mk
 
 TEMP            = $(APPSRC:.c=.o)
 APPOBJS         = $(TEMP:.S=.o)
+
+# v2395's cluster implementation has an extra source-level guard that cannot
+# be global: CLD_WINDOW_COVERING also enables the unused ZHA server device.
+WindowCovering.o: CFLAGS += -DCLD_WINDOW_COVERING
+
+# Implicit function declarations are FORBIDDEN in the host-diagnostic and
+# ZiGate overlay translation units.
+#
+# The OpenLumi application relied on C89 implicit declarations for the APDU
+# pool helpers u8GetApduUse()/u8GetMaxApdu(): with no prototype in scope GCC
+# assumes `int f()`, which silently discards argument checking and assumes the
+# wrong return type. Those two are now declared in zigate_apdu_diag.h, and this
+# flag makes any future recurrence a hard build error rather than a warning
+# nobody reads. Scoped per-object rather than globally, because the stock SDK
+# sources in this tree are not clean under this flag and are out of scope.
+DIAG_STRICT_OBJS = \
+    custom_diag.o \
+    app_general_events_handler.o \
+    app_zcl_event_handler.o \
+    app_Znc_cmds.o \
+    zigate_compat.o
+
+$(DIAG_STRICT_OBJS): CFLAGS += -Werror=implicit-function-declaration
 
 ###############################################################################
 # Application dynamic dependencies

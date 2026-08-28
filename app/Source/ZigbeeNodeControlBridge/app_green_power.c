@@ -62,6 +62,24 @@
 #define DEVICE_ID_GP_PROXY_BASIC            0x61
 #define PDM_VALID_BITS                      0x000F
 #define PDM_TRANS_POINTER_INFO_INDEX        0x04
+
+/* ZGP Proxy Commissioning Mode command Options subfields (ZGP spec A.3.3.5.3).
+ * The SDK keeps identical constants in GreenPower_internal.h, which lives under
+ * Components/ZCL/Clusters/GreenPower/Source and is deliberately NOT on the
+ * application include path; the spec values are restated here rather than
+ * widening the include path to a private SDK directory. */
+#define APP_GP_PROXY_CMSNG_MODE_ACTION_MASK             (0x01)
+#define APP_GP_PROXY_CMSNG_MODE_EXIT_ON_WINDOW_MASK     (0x02)
+
+/* eGP_Update20mS() is driven from the ZCL 1 ms timer and decrements
+ * u16CommissionWindow once per 20 ms tick (GreenPowerScheduler.c). */
+#define APP_GP_COMMISSION_TICKS_PER_SECOND              (50U)
+
+/* Accepted host-requested window, in seconds. Mirrors the 0x0D17 wire
+ * contract in custom_diag.h; kept local so this file does not depend on the
+ * serial ABI header. */
+#define DIAG_GP_TIMEOUT_MIN_SECONDS                     (1U)
+#define DIAG_GP_TIMEOUT_MAX_SECONDS                     (255U)
 /****************************************************************************/
 /***        Type Definitions                                              ***/
 /****************************************************************************/
@@ -93,6 +111,17 @@ PRIVATE tsGP_TranslationTableEntry* psApp_GPGetTranslationTable(
 #endif
 teGP_GreenPowerStatus eApp_UpdateTranslationTable(tsGP_ZgpsTranslationTableUpdate *psUpdateCmd);
 extern PUBLIC uint8 au8DefaultTCLinkKey[16];
+
+/* PUBLIC in the SDK (GreenPower_internal.h) but that header is not exported to
+ * applications. Declared here so u8App_GP_SetProxyCommissioningMode() can use
+ * the SDK's own transmit helper instead of hand-rolling the ZCL frame. The
+ * signature must stay byte-identical to the SDK declaration. */
+extern PUBLIC teZCL_Status eGP_ProxyCommissioningModeSend(
+        uint8                                       u8SourceEndPointId,
+        uint8                                       u8DestinationEndPointId,
+        tsZCL_Address                               *psDestinationAddress,
+        uint8                                       *pu8TransactionSequenceNumber,
+        tsGP_ZgpProxyCommissioningModeCmdPayload    *psZgpProxyCommissioningModeCmdPayload);
 void vAPP_GP_SetCommModeLtWt(void);
 
 bool  bAppAddTransTableEntries(
@@ -283,6 +312,147 @@ void vApp_GP_EnterCommissioningMode(void)
     DBG_vPrintf(TRACE_APP_GP, "eGP_ProxyCommissioningMode returned status 0x%x", u8Status);
 
 }
+
+/****************************************************************************
+ * NAME: u8App_GP_SetProxyCommissioningMode
+ *
+ * DESCRIPTION:
+ * Explicit, bounded, non-toggling local Green Power proxy commissioning
+ * control used by the negotiated 0x0D17 host command.
+ *
+ * WHY THIS IS NOT A PLAIN eGP_ProxyCommissioningMode() CALL
+ * ---------------------------------------------------------
+ * eGP_ProxyCommissioningMode() is the supported SDK entry point and IS used
+ * verbatim for the disable direction below. Its ENTER direction, however, is
+ * unreachable in a GP_PROXY_BASIC_DEVICE build: before sending anything it
+ * unconditionally does
+ *
+ *     eZCL_ReadLocalAttributeValue(ep, GREENPOWER_CLUSTER_ID, TRUE ...,
+ *                                  E_CLD_GP_ATTR_ZGPS_COMMISSIONING_EXIT_MODE)
+ *
+ * (GreenPowerProxyCommissioningMode.c). ZGPS_* are SINK/SERVER attributes:
+ * asCLD_GreenPowerClusterAttributeDefinitionsServer[] and the matching
+ * tsCLD_GreenPower server fields are compiled only under
+ * GP_COMBO_BASIC_DEVICE (GreenPower.c / GreenPower.h). This coordinator
+ * registers a proxy-basic endpoint (eGP_RegisterProxyBasicEndPoint above), so
+ * the read always fails and the function returns early WITHOUT changing state
+ * and WITHOUT transmitting. There is no supported SDK call that opens a proxy
+ * commissioning window on a proxy-only device, and adding the sink attribute
+ * set would mean turning the coordinator into a GP sink.
+ *
+ * The narrowest correct integration is therefore to reproduce exactly the
+ * state the SDK ENTER branch would have set, in the APPLICATION-OWNED
+ * sGPDeviceInfo storage (this file defines it; the SDK only holds a pointer),
+ * and to hand the frame to the SDK's own transmit helper. The bounded timeout
+ * is then enforced by the SDK's own scheduler: eGP_Update20mS()
+ * (GreenPowerScheduler.c, driven by the ZCL 1 ms timer registered in
+ * GreenPower.c) decrements u16CommissionWindow every 20 ms and calls
+ * vGP_ExitCommMode() when it reaches zero. No private SDK object is written
+ * and no SDK source is modified.
+ ****************************************************************************/
+uint8 u8App_GP_SetProxyCommissioningMode(bool_t  bEnable,
+                                         uint8   u8TimeoutSeconds,
+                                         uint8  *pu8EffectiveTimeoutSeconds)
+{
+    tsZCL_EndPointDefinition  *psEndPointDefinition = NULL;
+    tsZCL_ClusterInstance     *psClusterInstance    = NULL;
+    tsGP_GreenPowerCustomData *psGpCustomData       = NULL;
+    tsZCL_Address              sDestinationAddress;
+    teZCL_Status               eStatus;
+
+    if (pu8EffectiveTimeoutSeconds != NULL)
+    {
+        *pu8EffectiveTimeoutSeconds = 0;
+    }
+
+    sDestinationAddress.eAddressMode            = E_ZCL_AM_BROADCAST;
+    sDestinationAddress.uAddress.eBroadcastMode = ZPS_E_APL_AF_BROADCAST_RX_ON;
+
+    /* eGP_FindGpCluster() forces bIsServer internally from the compiled device
+     * role, so the argument is informational only. */
+    eStatus = eGP_FindGpCluster(GREENPOWER_END_POINT_ID,
+                                FALSE,
+                                &psEndPointDefinition,
+                                &psClusterInstance,
+                                &psGpCustomData);
+    if (eStatus != E_ZCL_SUCCESS)
+    {
+        return (uint8)eStatus;
+    }
+
+    if (!bEnable)
+    {
+        /* Supported SDK path: the EXIT branch reads no sink attribute. */
+        eStatus = eGP_ProxyCommissioningMode(GREENPOWER_END_POINT_ID,
+                                             ZPG_GP_ENDPOIND_ID,
+                                             sDestinationAddress,
+                                             E_GP_PROXY_COMMISSION_EXIT);
+        /* Defensive hygiene, not a correctness fix. The SDK EXIT branch sets
+         * eGreenPowerDeviceMode = E_GP_OPERATING_MODE
+         * (GreenPowerProxyCommissioningMode.c:232-236) but leaves the countdown
+         * value alone. That does NOT produce a second exit broadcast: the
+         * scheduler only calls vGP_ExitCommMode() when the countdown reaches
+         * zero AND eGreenPowerDeviceMode != E_GP_OPERATING_MODE
+         * (GreenPowerScheduler.c:108-116), which is already false here.
+         * Clearing it anyway keeps disable deterministic, stops the scheduler
+         * decrementing a countdown for a window that is already closed, and
+         * keeps u16CommissionWindow != 0 a truthful "window open" indicator for
+         * anything that later inspects it. */
+        psGpCustomData->u16CommissionWindow = 0;
+        return (uint8)eStatus;
+    }
+
+    if ((u8TimeoutSeconds < DIAG_GP_TIMEOUT_MIN_SECONDS) ||
+        (u8TimeoutSeconds > DIAG_GP_TIMEOUT_MAX_SECONDS))
+    {
+        return (uint8)E_ZCL_ERR_PARAMETER_RANGE;
+    }
+
+    {
+        tsGP_ZgpProxyCommissioningModeCmdPayload sPayload;
+        uint8 u8TransactionSequenceNumber = u8GetTransactionSequenceNumber();
+
+        memset(&sPayload, 0, sizeof(sPayload));
+        sPayload.b8Options = APP_GP_PROXY_CMSNG_MODE_ACTION_MASK |
+                             APP_GP_PROXY_CMSNG_MODE_EXIT_ON_WINDOW_MASK;
+        sPayload.u16CommissioningWindow = (uint16)u8TimeoutSeconds;
+
+        /* Local proxy state, exactly as the SDK ENTER branch would set it. */
+        psGpCustomData->eGreenPowerDeviceMode                 = E_GP_PAIRING_COMMISSION_MODE;
+        psGpCustomData->bProxyCommissionEnterCmdSent          = TRUE;
+        psGpCustomData->bIsCommissionIndGiven                 = FALSE;
+        psGpCustomData->bIsCommissionReplySent                = 0;
+        psGpCustomData->bCommissionExitModeOnFirstPairSuccess = 0;
+        psGpCustomData->u64CommissionSetAddress               = 0;
+        psGpCustomData->bCommissionUnicast                    = FALSE;
+        psGpCustomData->u16CommissionUnicastAddress           = 0;
+        /* 20 ms ticks; 255 s -> 12750, well inside uint16. */
+        psGpCustomData->u16CommissionWindow =
+            (uint16)u8TimeoutSeconds * APP_GP_COMMISSION_TICKS_PER_SECOND;
+
+        eStatus = eGP_ProxyCommissioningModeSend(GREENPOWER_END_POINT_ID,
+                                                 ZPG_GP_ENDPOIND_ID,
+                                                 &sDestinationAddress,
+                                                 &u8TransactionSequenceNumber,
+                                                 &sPayload);
+        if (eStatus != E_ZCL_SUCCESS)
+        {
+            /* Never leave the proxy commissioning on a frame that never left
+             * the node. */
+            psGpCustomData->eGreenPowerDeviceMode        = E_GP_OPERATING_MODE;
+            psGpCustomData->bProxyCommissionEnterCmdSent = FALSE;
+            psGpCustomData->u16CommissionWindow          = 0;
+            return (uint8)eStatus;
+        }
+    }
+
+    if (pu8EffectiveTimeoutSeconds != NULL)
+    {
+        *pu8EffectiveTimeoutSeconds = u8TimeoutSeconds;
+    }
+    return (uint8)E_ZCL_SUCCESS;
+}
+
 /****************************************************************************
  * NAME: vAPP_GP_LoadPDMData
  *

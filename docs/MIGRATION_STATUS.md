@@ -17,18 +17,80 @@ The requested image **compiles and links**:
 WWAH=0). Two clean builds are **byte-identical** (`.bin` and `.elf`):
 
 ```
-bin sha256 3cf35d6edd18b87136168b7bf4c4d0cfa42a653f2c0be3f566c9c930e7475e72
-elf sha256 41396046cdec920b5a7774fcc29707a96c7a4c7b4683d7cbfa2abb33cdbd20e3
-text=252808  data=2032  bss=30157
-RAM headroom = 0x7fb4 - (_minimum_heap_end 0x664c + __stack_size 0x1770)
-             = 32692 - 32188 = 504 bytes
+bin sha256 54eda516db00d7101ce3508bfb218e8e0755e9b14882fa3cff0c16228157cb28
+elf sha256 da0180668b0fbd3ba051fe6a207bc1eb7f506f01ed13df315427f0575b76ed75
+text=253604  data=2104  bss=30349          (ba-elf-size totals)
+.text=249744  .rodata=3860  .data=2028  .bss=22348  .heap=2000  .stack=6000
 ```
 
-(Hashes above are for **proto 1.2 / build rev 5** with negotiated Green Power
-commissioning. The flashable BIN was reproduced by two clean local builds.
+Note on the `.elf` hash: the loadable image (`.bin`, and therefore every
+allocatable section) has been unchanged at
+`54eda516db00d7101ce3508bfb218e8e0755e9b14882fa3cff0c16228157cb28` since the
+rev9 F1…F5 fixes. The `.elf` hash moved when the APDU-diagnostics prototypes
+were wired up (`zigate_apdu_diag.h`) purely because adding `#include` lines
+shifts line numbers in `.debug_line` and adds a file name to `.debug_str`.
+Adding a prototype for a `uint8 (void)` function changes no codegen on this
+ABI: `.text`, `.rodata`, `.data` and `.bss` are byte-for-byte identical, as
+proven by the unchanged `.bin`.
+
+Link-time RAM margin, computed with the linker's own expression
+(`Chip/JN5168/Build/AppBuildEnd.ld:106`,
+`ASSERT(LENGTH(ram) > ((_minimum_heap_end - ABSOLUTE(ORIGIN(ram))) + __stack_size))`):
+
+```
+LENGTH(ram)        = 0x07fb4    (32692)
+ORIGIN(ram)        = 0x0400004c
+_minimum_heap_end  = 0x04006754
+__stack_size       = 0x01770    (6000)
+
+used   = (0x04006754 - 0x0400004c) + 0x1770 = 0x6708 + 0x1770 = 0x7e78 (32376)
+margin = 0x7fb4 - 0x7e78                    = 0x13c            = 316 bytes
+```
+
+Note on the historical figure: earlier revisions of this document quoted
+**240 B**, obtained by subtracting `0x04000000` instead of `ORIGIN(ram)` from
+`_minimum_heap_end` (i.e. `0x7fb4 - (0x6754 + 0x1770)`). That drops the
+`0x4c` RAM origin offset and is therefore **76 B conservative**, not the
+linker's number. The linker's margin has been **316 B** for every revision from
+rev3 onwards, because `.data`/`.bss`/`_minimum_heap_end`/`__stack_size` have not
+moved across rev3…rev9. The conservative 240 B figure is retained nowhere; all
+RAM statements in this document now use the linker expression above.
+
+(Hashes above are for **proto 1.2 / build rev 9**, which restores the
+endpoint-1 raw-NCP transmit allowlist after physical HIL, on top of the rev8
+correlated Green Power commissioning command `0x0D17`/`0x8D17`. Both BIN and
+ELF were reproduced byte-for-byte by two clean local builds. rev9 is
+descriptor-only on the ZPS side: eight `const uint16` cluster ids were added to
+`s_au16Endpoint1OutputClusterList`, costing **16 B of `.text`** and **zero**
+`.data`/`.bss`.
+rev9 also carries the post-review fix that makes the endpoint-1 Time server
+read-only over Zigbee (see "Time cluster ownership" below): one 58-byte
+`.text` function (`bZigate_VetoRemoteTimeWrite`) plus its call site, **+60 B of
+flash and zero `.data`/`.bss`**, so the link-time RAM margin is unchanged at
+316 B. Neither the host wire ABI, `DIAG_PROTO_MINOR`, `DIAG_BUILD_REVISION`
+nor `DIAG_FW_BUILD_ID` (`0x01014525`) changed, so the fix was folded into rev9
+in place rather than widened to a rev10 — exactly as rev8 was corrected in
+place. This is only legitimate because rev9 was never flashed or published:
+its previous artifact `bin 457c49fc… / elf 417f09f2…` at `text=253544` exists
+only in the working tree and appears nowhere in committed history.
+The rev8 image was `bin 2bc2b354… / elf 17ba7210…` at `text=253528`; rev8 adds
+a 32-bit per-request transaction id to that one command
+(request 3 → 7 bytes, response 5 → 9 bytes) and costs 56 B of `.text` and
+**zero** `.bss`/`.data`.
+rev8 was never flashed or published, so its ABI was corrected in place before
+release rather than being widened to a rev9: the byte-wide transaction id of
+the first rev8 draft (request 4 / response 6 bytes) could wrap among callers
+queued on the host's serialized request lock, and the same pass fixed a
+one-byte stack overflow in the diagnostic `0x8000` status helper
+(`au8Status[8]` → `[9]`, because `vSL_WriteMessage()` writes the link-quality
+byte at `pu8Data[8]`).
+The rev7 image, whose 0x8D17 response carried no correlation field, was
+`bin c612e896… / elf b1457e86…` at `text=253464`.
+The rev6 image, which advertised the GP capability bit without a command
+behind it, was `bin 3f601b06… / elf d54e19b7…` at `text=253092`.
 The rev4 image before the additive GP capability bit was
 `bin e4f00796… / elf d903dc16…`.
-The earlier rev3 image was `bin 7a878ca6… / elf 872b6d5d…`.)
+The earlier rev3 image was `bin 7a878ca6… / elf 872b6d5d….`)
 
 ### Independent-review fixes (applied before final build)
 
@@ -55,14 +117,60 @@ Determinism is pinned by `scripts/build.sh` (`LC_ALL=C`, `TZ=UTC`,
 safety fixes, the custom diagnostic ABI and the negotiated manufacturer-code
 command are implemented (see below).
 
+### Implicit function declarations are forbidden in the diagnostics paths
+
+OpenLumi called the APDU-pool helpers `u8GetApduUse()` / `u8GetMaxApdu()`
+without any prototype in scope. Under C89 rules GCC then invents
+`int u8GetApduUse()`, which assumes the wrong return type and disables
+argument checking. It happened to be harmless here — both functions really
+return `uint8`, every call site immediately truncates the result to one octet
+via `ZNC_BUF_U8_UPD`, and the `.bin` is unchanged now that the prototypes are
+visible — but it is exactly the class of defect that turns into a silent
+wrong-value or stack-corruption bug the moment a signature changes.
+
+Fix, in three parts:
+
+1. **One declaration, in a dependency-free header.**
+   `zcl_overlay/zigate_apdu_diag.h` declares both symbols and includes
+   `<jendefs.h>` and nothing else, so it cannot participate in an include
+   cycle. `zigate_compat.h` now *includes* it instead of restating the
+   prototypes, so there is exactly one declaration of each symbol in the tree
+   and the definitions in `zigate_compat.c` are checked against it.
+   The diagnostics translation units (`custom_diag.c`,
+   `app_general_events_handler.c`) include the small header directly rather
+   than `zigate_compat.h`, which would have dragged `zcl_options.h`, `zcl.h`,
+   `ZclTime.h`, `WindowCovering.h`, `control_bridge.h` and
+   `MultistateInputBasic.h` into the host-diagnostics path for the sake of two
+   `uint8 (void)` prototypes.
+2. **Hard build failure on recurrence.** `DIAG_STRICT_OBJS` in
+   `app/Build/ZigbeeNodeControlBridge/Makefile` adds
+   `-Werror=implicit-function-declaration` to `custom_diag.o`,
+   `app_general_events_handler.o`, `app_zcl_event_handler.o`,
+   `app_Znc_cmds.o` and `zigate_compat.o`. It is scoped per object (the same
+   pattern as `WindowCovering.o: CFLAGS += -DCLD_WINDOW_COVERING`) because the
+   stock SDK sources in this tree are *not* clean under this flag — e.g.
+   `Components/ZCL/Clusters/OTA/Source/OTA_common.c:261` calls
+   `OTA_SetNewImageFlag` implicitly. That is stock v2395 code, out of scope,
+   and left untouched.
+3. **Machine-checked.** `scripts/check.sh` asserts that the header declares
+   both symbols, that it includes only `jendefs.h`, that each symbol is
+   declared in exactly one file, and that *every* `.c` calling them both
+   includes a declaring header and appears in `DIAG_STRICT_OBJS`. The caller
+   set is discovered by grep, so a new call site in a new file fails the check
+   until it is wired up.
+
+After the fix the application sources emit **zero**
+`-Wimplicit-function-declaration` diagnostics.
+
 ### RAM budget note (JN5169 32 KB SRAM)
 
 The stock GP-proxy coordinator `.zpscfg` shipped `RoutingTableSize="255"`
 (a 3060-byte route table) which overflowed SRAM by 1428 B at link
 (`ASSERT ... "Possible overflow of RAM"`). It was right-sized to `70` to match
 the four sibling coordinator `.zpscfg` variants in this tree, recovering
-2208 B of BSS. Current headroom is small (**504 B**); new features that add BSS
-must be checked against the link-time RAM assert.
+2208 B of BSS. Current margin against the link-time RAM assert is small
+(**316 B**, derived above with the linker's own `ORIGIN(ram)`-relative
+expression); new features that add BSS must be checked against that assert.
 
 ### Green Power RAM reduction — evaluated, capacities preserved
 
@@ -161,14 +269,174 @@ units after `app_Znc_cmds.c` is resolved (`app_zcl_event_handler.c`,
 ## Blocker B — OpenLumi modified the SDK ZCL device/cluster layer  [RESOLVED]
 
 Resolved by adapting the app to stock v2395 rather than forward-porting the
-OpenLumi ZCL. The Time "server" (used by the app only as a host UTC counter,
-not a network-registered cluster) is provided as standalone overlay storage
-`sZigateTimeServerCluster`. Private OpenLumi quirks that depend on the modified
-SDK ZCL — OnOff 0xFD "Lora tap", IKEA remote Scenes commands — are gated behind
-`ZIGATE_ENABLE_OPENLUMI_PRIVATE_QUIRKS` (default OFF); the private Legrand Basic
-attribute is disabled. The real stock cluster
+OpenLumi ZCL. A minimal endpoint-1 overlay now registers a real **Time
+server**, **Window Covering client**, and **IAS Warning Device client**. The
+Time factory uses the existing `sZigateTimeServerCluster`, so network reads,
+host SET/GET, and the existing 1 Hz increment all share the same UTC storage.
+The two client instances make the existing Window Covering and IAS WD serial
+send paths pass v2395's local-cluster lookup instead of returning
+`E_ZCL_ERR_CLUSTER_NOT_FOUND`.
+
+The overlay appends three instances to the stock ControlBridge instance array;
+the stock registration routine remains unchanged and includes them through
+its existing `sizeof` count. Compile-time offset checks enforce that the three
+instances stay contiguous at the array tail. Enabling the v2395 Window
+Covering client exposed two stock implementation defects (a missing client
+attribute-definition comma and client initialization cast to the server
+type); both were corrected to match `WindowCovering.h`.
+
+Private OpenLumi quirks that depend on the modified SDK ZCL — OnOff 0xFD
+"Lora tap", IKEA remote Scenes commands — are gated behind
+`ZIGATE_ENABLE_OPENLUMI_PRIVATE_QUIRKS` (default OFF); the private Legrand
+Basic attribute is disabled. The real stock cluster
 `GENERAL_CLUSTER_ID_MULTISTATE_INPUT_BASIC` is resolved by including
 `MultistateInputBasic.h`. Historical analysis retained below.
+
+### Endpoint-1 descriptor/runtime reconciliation
+
+The selected GP Proxy coordinator `.zpscfg` advertises the runtime server set
+**Basic, Groups, On/Off, OTA, Time**, and the endpoint-1 **OutputClusters**
+list documented under "raw-NCP transmit allowlist" below. Groups and On/Off
+server descriptors were made discoverable. The `0xFFFF` Default input remains
+non-discoverable because ZiGate raw/hybrid APS forwarding uses it as the
+generic endpoint-1 sink.
+
+False *input* (server) descriptor entries were removed in rev6 rather than
+spending the remaining RAM on unsupported instances, and that pruning stands:
+
+- input-side client-only entries (Colour, Identify, Level, Scenes, Door Lock,
+  Metering, IAS Zone, Thermostat, measurement clients, Diagnostics and ZLL
+  Commissioning) were removed from the server list;
+- unsupported input servers (Power Configuration, Thermostat UI, Appliance
+  Statistics, Electrical Measurement, Illuminance Level, Occupancy and
+  Pressure) were removed.
+
+### Endpoint-1 raw-NCP transmit allowlist (rev9, corrected after HIL)
+
+rev6 also pruned the **output** list on the same "no local client instance =
+false advertisement" reasoning. Physical HIL after the host-side `0x0530`
+fixes shows that reasoning does not hold for an NCP:
+
+- a raw Basic `0x0000` read succeeds — and it succeeds *only* because Basic
+  survived the pruning as an output cluster;
+- a raw Power Configuration `0x0001` read or configure-reporting is rejected
+  **locally by the JN5169** with APS status `0xA3`
+  (`ZPS_APL_APS_E_ILLEGAL_REQUEST`) before anything is transmitted, because
+  endpoint 1 no longer lists `0x0001` as an output cluster.
+
+The ZPS APS layer therefore treats an endpoint's OutputClusters list as the
+**allowlist for raw, host-originated transmissions**, independently of whether
+a firmware-resident ZCL client instance exists. In this NCP the host is the
+Zigbee controller, so those entries are a truthful statement of what the
+host+NCP pair can originate, not a claim about firmware ZCL objects. rev9
+restores the entries the hub legitimately originates:
+
+| Cluster | Id | Why the hub originates it |
+| --- | --- | --- |
+| Power Configuration | `0x0001` | battery reads and default battery-percentage reporting configuration |
+| Multistate Input | `0x0012` | converter/interview attribute reads |
+| OTA Upgrade | `0x0019` | host-driven OTA server frames (Image Notify, block/query responses) are sent through raw `0x0530` |
+| Thermostat UI Configuration | `0x0204` | display-mode / keypad-lockout reads and writes |
+| Illuminance Level Sensing | `0x0401` | level-status / target-level reads |
+| Pressure Measurement | `0x0403` | measured-value reads and reporting setup |
+| Occupancy Sensing | `0x0406` | occupancy reads and reporting setup |
+| Electrical Measurement | `0x0B04` | power/voltage/current reads and reporting setup |
+
+Kept from before: Basic, Identify, Groups, Scenes, On/Off, Level Control,
+Colour Control, Door Lock, Metering, IAS Zone, Thermostat, Illuminance
+Measurement, Relative Humidity, Temperature, Diagnostics, Window Covering,
+IAS Warning Device.
+
+**Appliance Statistics `0x0B03` was deliberately NOT restored**: the host has
+no decoder, converter, interview or command path for it — only a cluster-name
+string — so no legitimate origination exists to authorize.
+
+Two invariants this must not violate, both asserted by `scripts/check.sh`:
+
+1. **No ZCL runtime instances are added for raw APS.** An output-descriptor
+   entry authorizes the NCP to *originate* a cluster through `0x0530`; it does
+   not require, and must not be paired with, a local cluster instance. Local
+   instances remain necessary only where the *firmware itself* calls
+   `eZCL_CustomCommandSend` (Window Covering client, IAS WD client) or answers
+   network reads (Time server) — exactly the three overlay instances.
+2. **Flash/const only.** The additions land in
+   `s_au16Endpoint1OutputClusterList` (`const uint16`, .rodata): `text`
+   253528 → 253544 (+16 B = 8 × 2 B), `data` 2104 and `bss` 30349 unchanged,
+   link-time RAM margin still 316 B. (The final rev9 image is `text` 253604
+   because of the +60 B Time-write veto described above; that is also
+   `.text`-only and leaves `data`/`bss`/margin unchanged.)
+
+Endpoint 242 Green Power descriptors and all ZDP endpoint-0 descriptors are
+unchanged. The raw APS serial command itself is unchanged.
+
+### Time cluster ownership — host-owned, read-only over Zigbee
+
+`sZigateTimeServerCluster` (`zcl_overlay/zigate_compat.c`) is the single UTC
+value shared by the host protocol and the endpoint-1 ZCL Time server
+(cluster `0x000A`). Its access model is:
+
+| Path | Direction | Allowed |
+|---|---|---|
+| `E_SL_MSG_SET_TIMESERVER` (`0x0016`, UART host) | write | **yes** |
+| 1 Hz increment in `app_start.c` | write | **yes** |
+| `E_SL_MSG_GET_TIMESERVER` (`0x0017`, UART host) | read | **yes** |
+| Remote ZCL Read Attributes, EP1 / `0x000A` | read | **yes** |
+| Remote ZCL Write Attributes, EP1 / `0x000A` | write | **no** — ZCL status `0x7e` NOT_AUTHORIZED |
+
+Why the veto is required. `ZclTime.h` marks `Time` and `TimeStatus`
+`(E_ZCL_AF_RD | E_ZCL_AF_WR)` when `TIME_SERVER` is defined, and although
+`sCLD_Time` declares `E_ZCL_SECURITY_APPLINK`, `zcl.c:128` initialises
+`psZCL_Common->eSecuritySupported` to `E_ZCL_SECURITY_NETWORK` and this
+application never calls `eZCL_SetSupportedSecurity()`, so `zcl_event.c:653-654`
+clamps the cluster's requirement back down to NETWORK. Registering the Time
+server for network *reads* therefore also opened a network *write* path: any
+node holding only the network key could rewrite the clock the host reads back
+over `0x0017`. Before rev9 registered the server this storage had no network
+path at all, so this was a newly introduced surface, not an inherited one.
+
+How the veto works. `bZigate_VetoRemoteTimeWrite()` handles
+`E_ZCL_CBET_CHECK_ATTRIBUTE_RANGE` and sets
+`uMessage.sIndividualAttributeResponse.eAttributeStatus =
+E_ZCL_ERR_ATTRIBUTES_ACCESS` for any Time **server** instance.
+`zcl_WriteAttributesRequestHandle.c:290-294` maps that to
+`E_ZCL_CMDS_NOT_AUTHORIZED` (`0x7e`), and the mutation at `:324-337` is gated
+on `u8errorCode == E_ZCL_CMDS_SUCCESS`, so **the attribute is never written**.
+For the *undivided* write variant the range check runs on pass 0 and clears
+`bNoErrors` (declared once at `:133`, never reset), which gates the pass-1
+write through `(bNoErrors || !bIsUndivided)` — the whole undivided record set
+is refused.
+
+Why it cannot be bypassed, and cannot misfire:
+
+- `E_ZCL_CBET_CHECK_ATTRIBUTE_RANGE` has exactly **one** emitter in the SDK,
+  the remote Write Attributes handler. Host `SET` and the 1 Hz increment write
+  the struct directly and never traverse ZCL, so they are structurally
+  unreachable from the veto.
+- The call is the **first statement** of `APP_ZCL_cbEndpointCallback`, above the
+  `RAW_MODE_ON` block that forwards the indication to the host and returns
+  early. Placing it after that block would let raw mode skip authorization
+  entirely.
+- Both properties are machine-checked by `scripts/check.sh`: it asserts the
+  single-emitter property, the `E_ZCL_ERR_ATTRIBUTES_ACCESS → NOT_AUTHORIZED`
+  mapping, that the host SET/increment still write the struct directly, and —
+  by line-number ordering inside the function body — that the veto call
+  precedes the `RAW_MODE_ON` block with no `return` before it. The call must
+  appear as a real `(void)…;` statement, so a comment mentioning the function
+  does not satisfy the assertion.
+- Three compile-time asserts in `zigate_compat.c` pin
+  `E_ZCL_CMDS_SUCCESS == 0`, `E_ZCL_ERR_ATTRIBUTES_ACCESS != E_ZCL_CMDS_SUCCESS`
+  and `E_ZCL_CMDS_NOT_AUTHORIZED == 0x7e`, so an SDK renumbering breaks the
+  build instead of silently degrading the veto into a soft `INVALID_VALUE`.
+
+Cost: 58 B of `.text` for the function plus its call site (+60 B of flash
+total), zero `.data`/`.bss`, no change to the host wire ABI.
+
+### OTA build-variable reality
+
+The target still passes `OTA=0`, but the Makefile does not consume that
+variable to disable OTA. `zcl_options.h` unconditionally defines
+`CLD_OTA`/`OTA_SERVER`, OTA sources are linked, and endpoint 1 truthfully
+advertises the OTA server. Thus `OTA=0` currently **does not disable OTA**.
 
 Stock v2395 `Components/ZCL/Devices/ZLO/Include/control_bridge.h` does **not**
 contain the clusters the OpenLumi app expects. The OpenLumi 1840 device added,
@@ -198,13 +466,59 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 3. Resolve Blocker A symbol deltas with validated mappings.
 4. Add protocol extensions and safety fixes as reviewable commits.
 
-## Diagnostic ABI — proto 1.2 / build rev 5
+## Diagnostic ABI — proto 1.2 / build rev 9
 
-- Protocol **1.2**, build **rev 5**; capability response `0x8D0F`.
-- **Green Power commissioning** is capability bit `1 << 3` and is compiled into
-  the bitmap only when `CLD_GREENPOWER` is enabled. It permits the host to send
-  Proxy Commissioning Mode through endpoint 242. GP shared-key programming is
-  deliberately not advertised because no corresponding serial command exists.
+- Protocol **1.2**, build **rev 9**; capability response `0x8D0F`;
+  deterministic build id `0x01014525` (rev8 was `0x01014524`, rev7
+  `0x0101452B`; only the build revision changed).
+- **rev9 is descriptor-only.** No wire structure, command encoding or
+  capability bit changed; the revision exists so a host can tell from the
+  build id whether the image can originate the restored endpoint-1 output
+  clusters through raw `0x0530` at all (see "Endpoint-1 raw-NCP transmit
+  allowlist" above). No ZCL runtime instance, RAM pool, table size or security
+  surface was touched.
+- **Green Power commissioning** is capability bit `1 << 3`. Since rev7 it is
+  backed by a real negotiated command, `0x0D17`/`0x8D17`, and the bit and the
+  handler share one compile switch (`DIAG_HAVE_GP_COMMISSIONING`, derived from
+  `CLD_GREENPOWER`) so no build can advertise the capability without
+  implementing it. The firmware drives its **own** Green Power proxy
+  commissioning state machine on the locally mapped GP endpoint
+  (`GREENPOWER_END_POINT_ID = 2`) towards APS endpoint 242, and the SDK's 20 ms
+  GP scheduler closes the window when the requested 1..255 s timeout expires.
+  This replaces the rev5/rev6 arrangement where the bit was advertised with no
+  command behind it and the host emulated the operation with a raw `0x0530`
+  send-data frame aimed at `0xFFFC` — an acknowledged unicast encoding that the
+  physical rev6 HIL rejected with `ZPS_APL_APS_E_NO_ACK` (`0xA6`), and which
+  would not have opened the coordinator's local window even if it had been
+  transmitted. See [`DIAGNOSTIC_ABI_GREEN_POWER.md`](DIAGNOSTIC_ABI_GREEN_POWER.md).
+  GP shared-key programming remains deliberately unimplemented and
+  unadvertised because no corresponding serial command exists.
+- **Per-request correlation (rev8)** — the rev7 `0x0D17`/`0x8D17` pair carried
+  no correlation field, and the stock serial protocol correlates a data
+  response only by its response type. A valid but late `0x8D17` answering a
+  request the host had already timed out was therefore indistinguishable from
+  the answer to the *next* request and could be consumed by it, reporting a
+  stale commissioning window as the current one. rev8 re-encodes only this
+  command: the request is `version, transaction_id[4, big-endian], action,
+  timeout_seconds` (7 bytes) and the response is
+  `version, transaction_id[4, big-endian], status, effective_mode,
+  effective_timeout, gp_status` (9 bytes). The id is 32 bits wide, encoded
+  big-endian like the `0x0D0F` nonce, so a host counter cannot wrap onto the
+  id of a still-outstanding transaction while callers queue on the host's
+  serialized request lock; the first rev8 draft used a single byte and could.
+  The firmware treats the id as opaque and echoes it on every response emitted
+  for a structurally valid request, success or Green Power failure. It also
+  emits `status = OK` if and only if the underlying GP call returned
+  `E_ZCL_SUCCESS`, an invariant the host now enforces on receive. The protocol
+  version stays 1.2 and every other command encoding is byte-identical; the
+  command is capability-gated and hosts re-negotiate `0x0D0F` (and read the
+  changed build id) before using it.
+- **Diagnostic `0x8000` status buffer (rev8 release gate)** — `vDiagSendStatus()`
+  in `custom_diag.c` serialises 8 payload bytes and `vSL_WriteMessage()` then
+  writes the link-quality byte at `pu8Data[8]`, but the local buffer was
+  `uint8 au8Status[8]`, so every diagnostic status frame overflowed its own
+  stack frame by exactly one byte. The buffer is now `[9]`; `scripts/check.sh`
+  asserts it.
 - **Canonical TX-power semantics (rev4)** — corrected from rev3 per the
   physical HIL + MiniMac disassembly: in the linked MiniMac path **0x40 is NOT
   round-trippable** (SET sign-extends the low 6 bits to 0; GET returns a
@@ -217,9 +531,20 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
     canonical six-bit code) and `byte1 = legacy mapped level` derived from that
     six-bit code, then the appended LQI byte. (rev3 wrongly echoed the full
     raw low byte incl. the phantom 0x40 bit.)
-  - **General diag** (`0x0D1F`) TX fields are `[six-bit code][legacy level]
-    [signed six-bit code]`, where signed = `(six & 0x20) ? six-64 : six`. All
-    truthful; no phantom 0x40.
+  - **General diag** (`0x0D1F`) TX fields are `[six-bit code][six-bit code]
+    [signed six-bit code]`, where signed = `(six & 0x20) ? six-64 : six`.
+    Rev 6 makes both unsigned protocol-1.2 fields canonical; no phantom 0x40.
+  - **The two representations deliberately DO NOT agree from rev6 onwards.**
+    `0x8D1F` byte1 is the canonical raw six-bit register code; `0x8806`/`0x8807`
+    byte1 is the **legacy mapped level** from the threshold ladder in
+    `app_Znc_cmds.c:429-434` (`<=31 → 0`, `<=39 → 32`, `<=51 → 20`, else `9`).
+    rev4 had kept them in agreement; rev6 diverged them on purpose and this is
+    **not** a defect to be "harmonised": changing `0x8806`/`0x8807` would break
+    deployed hosts that parse the legacy mapping, and changing `0x8D1F` would
+    reintroduce a lossy mapping into the diagnostic path. Hosts must key the
+    `0x8D1F` TX interpretation off **build revision ≥ 6** via
+    `DIAG_FW_BUILD_ID`. No claim anywhere in this repository asserts that the
+    two frames agree.
   - Wire shapes are byte-length-stable; only the byte *values*/validation
     changed, hence the proto-minor + build-rev bump (host validator must move
     to 1.2 / rev 4).

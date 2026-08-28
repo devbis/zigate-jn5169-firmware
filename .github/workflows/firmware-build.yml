@@ -29,6 +29,9 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install "xmltodict==0.13.0" lxml
 
+      - name: Check source and ABI invariants
+        run: sh scripts/check.sh
+
       - name: Download pinned BA2 toolchain
         env:
           TOOLCHAIN_URL: https://github.com/openlumi/BA2-toolchain/releases/download/${{ env.BA2_TOOLCHAIN_TAG }}/${{ env.BA2_TOOLCHAIN_ARCHIVE }}
@@ -51,7 +54,7 @@ jobs:
       - name: Verify firmware
         working-directory: app/Build/ZigbeeNodeControlBridge
         run: |
-          echo "3cf35d6edd18b87136168b7bf4c4d0cfa42a653f2c0be3f566c9c930e7475e72  $FIRMWARE_BASENAME.bin" | sha256sum --check
+          echo "54eda516db00d7101ce3508bfb218e8e0755e9b14882fa3cff0c16228157cb28  $FIRMWARE_BASENAME.bin" | sha256sum --check
           sha256sum "$FIRMWARE_BASENAME.elf"
           "$RUNNER_TEMP/ba2-toolchain/ba-elf-ba2/bin/ba-elf-size" "$FIRMWARE_BASENAME.elf"
 

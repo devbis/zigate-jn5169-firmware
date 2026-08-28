@@ -68,6 +68,11 @@ extern "C" {
 #ifdef CLD_DIAGNOSTICS
 #include "Diagnostics.h"
 #endif
+#ifdef ZIGATE_CONTROL_BRIDGE_OVERLAY
+#include "ZclTime.h"
+#include "WindowCovering.h"
+#include "IASWD.h"
+#endif
 
 /****************************************************************************/
 /***        Macro Definitions                                             ***/
@@ -199,6 +204,18 @@ typedef struct
 
     #if (defined CLD_APPLIANCE_STATISTICS) && (defined APPLIANCE_STATISTICS_CLIENT)
         tsZCL_ClusterInstance sASCClient;
+    #endif
+
+    /*
+     * ZiGate application overlay.  These instances are deliberately appended
+     * so the stock registration routine's sizeof-based cluster count includes
+     * them while all stock ControlBridge layout and creation code stays
+     * unchanged.
+     */
+    #ifdef ZIGATE_CONTROL_BRIDGE_OVERLAY
+        tsZCL_ClusterInstance sTimeServer;
+        tsZCL_ClusterInstance sWindowCoveringClient;
+        tsZCL_ClusterInstance sIASWarningDeviceClient;
     #endif
 
 } tsZLO_ControlBridgeDeviceClusterInstances __attribute__ ((aligned(4)));
@@ -366,6 +383,13 @@ typedef struct
 
     #if (defined CLD_DIAGNOSTICS) && (defined DIAGNOSTICS_CLIENT)
         tsZCL_ClusterInstance sDiagnosticClientCluster;
+    #endif
+
+    #ifdef ZIGATE_CONTROL_BRIDGE_OVERLAY
+        tsCLD_WindowCoveringClient sWindowCoveringClientCluster;
+        tsCLD_WindowCoveringCustomDataStructure sWindowCoveringClientCustomDataStructure;
+        tsCLD_IASWD sIASWarningDeviceClientCluster;
+        tsCLD_IASWD_CustomDataStructure sIASWarningDeviceClientCustomDataStructure;
     #endif
 
 } tsZLO_ControlBridgeDevice;

@@ -185,7 +185,7 @@ uint8 au8WindowCoveringAttributeControlBits[(sizeof(asCLD_WindowCoveringClusterA
 #ifdef WINDOW_COVERING_CLIENT
 
 const tsZCL_AttributeDefinition asCLD_WindowCoveringClientClusterAttributeDefinitions[] = {
-    {E_CLD_GLOBAL_ATTR_ID_FEATURE_MAP, (E_ZCL_AF_RD|E_ZCL_AF_GA), E_ZCL_BMAP32, (uint32)(&((tsCLD_WindowCoveringClient*)(0))->u32FeatureMap), 0}
+    {E_CLD_GLOBAL_ATTR_ID_FEATURE_MAP, (E_ZCL_AF_RD|E_ZCL_AF_GA), E_ZCL_BMAP32, (uint32)(&((tsCLD_WindowCoveringClient*)(0))->u32FeatureMap), 0},
     {E_CLD_GLOBAL_ATTR_ID_CLUSTER_REVISION, (E_ZCL_AF_RD|E_ZCL_AF_GA), E_ZCL_UINT16, (uint32)(&((tsCLD_WindowCoveringClient*)(0))->u16ClusterRevision), 0}
 };
 
@@ -278,8 +278,8 @@ PUBLIC teZCL_Status eCLD_WindowCoveringCreateWindowCovering(
         {
         #ifdef WINDOW_COVERING_CLIENT
             // set default state
-            ((tsCLD_WindowCovering *)(psClusterInstance->pvEndPointSharedStructPtr))->u16ClusterRevision = CLD_WC_CLUSTER_REVISION;
-            ((tsCLD_WindowCovering *)(psClusterInstance->pvEndPointSharedStructPtr))->u32FeatureMap = CLD_WC_FEATURE_MAP;
+            ((tsCLD_WindowCoveringClient *)(psClusterInstance->pvEndPointSharedStructPtr))->u16ClusterRevision = CLD_WC_CLUSTER_REVISION;
+            ((tsCLD_WindowCoveringClient *)(psClusterInstance->pvEndPointSharedStructPtr))->u32FeatureMap = CLD_WC_FEATURE_MAP;
         #endif
         }
     }
@@ -356,4 +356,3 @@ PRIVATE  teZCL_Status eCLD_WindowCoveringSceneEventHandler(
 /****************************************************************************/
 /***        END OF FILE                                                   ***/
 /****************************************************************************/
-

@@ -41,6 +41,13 @@
 #include "mac_sap.h"
 #include "bdb_api.h"
 #include "custom_diag.h"
+/* APDU-pool usage helpers (u8GetApduUse). Minimal, dependency-free header;
+ * implicit declaration of these is forbidden in this file, which is compiled
+ * with -Werror=implicit-function-declaration. */
+#include "zigate_apdu_diag.h"
+#ifdef DIAG_HAVE_GP_COMMISSIONING
+#include "app_green_power.h"
+#endif
 
 /****************************************************************************/
 /***        External application state                                    ***/
@@ -64,11 +71,14 @@ PRIVATE uint8 s_au8DiagTx[DIAG_TX_BUFFER_SIZE];
 /***        Local helpers                                                 ***/
 /****************************************************************************/
 
-/* Emit the stock 7-byte E_SL_MSG_STATUS (0x8000) frame, matching the exact
+/* Emit the stock 8-byte E_SL_MSG_STATUS (0x8000) frame, matching the exact
  * field order used by every other command in app_Znc_cmds.c. */
 PRIVATE void vDiagSendStatus(uint16 u16PacketType, uint8 u8Status)
 {
-    uint8 au8Status[8];   /* 7 payload bytes + 1 reserved LQI byte */
+    /* 8 serialised payload bytes + 1 reserved byte for the link-quality byte
+     * vSL_WriteMessage() writes at pu8Data[u16Length] before transmitting.
+     * Sizing this 8 overflowed the stack frame by exactly that one byte. */
+    uint8 au8Status[9];
     uint8 u8Length = 0;
 
     ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], u8Status,             u8Length );
@@ -99,18 +109,6 @@ PRIVATE uint8 u8DiagTxPowerSixBit(void)
         return (uint8)(u32TxPower & PHY_PIB_TX_POWER_MASK);   /* 0x3F */
     }
     return DIAG_U8_NA;
-}
-
-/* Legacy mapped level derived from the six-bit code, using the same thresholds
- * as the 0x8806/0x8807 wire byte1 so the two representations agree. Preserves
- * the historical middle diagnostic byte. */
-PRIVATE uint8 u8DiagTxPowerLevel(uint8 u8SixBit)
-{
-    if (u8SixBit == DIAG_U8_NA) { return DIAG_U8_NA; }
-    if (u8SixBit <= 31) { return 0; }
-    if (u8SixBit <= 39) { return 32; }
-    if (u8SixBit <= 51) { return 20; }
-    return 9;   /* six-bit level 52..63 */
 }
 
 /* Truthful signed interpretation of the six-bit two's-complement code:
@@ -255,7 +253,6 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     uint8         u8RtUsed = 0, u8RtTotal = 0;
     uint8         u8GrUsed = 0, u8GrTotal = 0;
     uint8         u8TxSixBit;
-    uint8         u8TxLevel;
     uint8         u8DiagFlags = 0;
     uint8         u8TclkCb, u8TclkAddRepl, u8TclkCred;
 
@@ -276,7 +273,6 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     vDiagRouteUsage(psNib, &u8RtUsed, &u8RtTotal);
     vDiagGroupUsage(psGroup, &u8GrUsed, &u8GrTotal);
     u8TxSixBit = u8DiagTxPowerSixBit();
-    u8TxLevel = u8DiagTxPowerLevel(u8TxSixBit);
 
     /* TCLK summary: the TCLK diagnostic subsystem (crypto-path --wrap
      * interposition + full internal security-state export) has been REMOVED as
@@ -324,12 +320,23 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], PDUM_u8GetNpduUse(), u8Length );
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8GetApduUse(),      u8Length );
 
-    /* rev4 TX power: canonical six-bit code (GET & 0x3F), legacy mapped level,
-     * signed six-bit code. The six-bit code is round-trippable; the signed
-     * code is NOT an exact radiated dBm value. (rev3 exposed a phantom full
-     * PIB byte with a bogus 0x40 tolerance bit — removed.) */
+    /* rev6 TX power: canonical six-bit code (GET & 0x3F), repeated canonical
+     * level, signed six-bit code. Protocol 1.2 defines both unsigned fields as
+     * the native round-trippable code; the signed code is NOT an exact
+     * radiated dBm value.
+     *
+     * DELIBERATE DIVERGENCE from the legacy 0x8806/0x8807 frames: those keep
+     * byte0 = six-bit code but byte1 = the LEGACY MAPPED LEVEL produced by the
+     * threshold ladder in app_Znc_cmds.c (<=31 -> 0, <=39 -> 32, <=51 -> 20,
+     * else 9). Here byte1 is the six-bit code again. The two representations
+     * therefore DO NOT agree, and that is intended: 0x8D1F is the canonical
+     * raw-register view, 0x8806/0x8807 preserve the legacy ZiGate mapping that
+     * existing hosts parse. Do not "harmonise" them - changing 0x8806/0x8807
+     * would break deployed hosts, and changing 0x8D1F would reintroduce a
+     * lossy mapping into the diagnostic path. Hosts must key the 0x8D1F
+     * interpretation off build revision >= 6 (see DIAG_FW_BUILD_ID). */
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxSixBit,  u8Length );
-    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxLevel,   u8Length );
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8TxSixBit,  u8Length );
     ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], (uint8)i8DiagTxPowerSignedCode(u8TxSixBit), u8Length );
 
     /* PDM occupancy / wear (safe, read-only) */
@@ -857,6 +864,136 @@ PUBLIC void CUSTOMDIAG_vHandleManufCode(uint16 u16Len, const uint8 *pu8Rx)
 
     vSL_WriteMessage(E_SL_MSG_MANUFACTURER_CODE_RSP, u8Length, s_au8DiagTx, 0);
 }
+
+/****************************************************************************/
+/***        Green Power proxy commissioning window (0x0D17 / 0x8D17)      ***/
+/***                                                                       ***/
+/*** Negotiated, explicit, bounded control of the LOCAL Green Power proxy  ***/
+/*** commissioning state machine. The stock firmware exposes no GP command,***/
+/*** and a host-built ZGP Proxy Commissioning Mode frame pushed through the***/
+/*** ordinary 0x0530 data request is not equivalent: it is encoded as an   ***/
+/*** acknowledged unicast to 0xFFFC (rejected on the rev6 HIL with         ***/
+/*** ZPS_APL_APS_E_NO_ACK / 0xA6) and, even when it does leave the node, it***/
+/*** never opens or bounds the coordinator's OWN proxy commissioning       ***/
+/*** window. This command drives the SDK state machine on the locally      ***/
+/*** mapped GP endpoint (GREENPOWER_END_POINT_ID) towards APS endpoint 242 ***/
+/*** and lets the SDK's 20 ms GP scheduler close the window on expiry.     ***/
+/***                                                                       ***/
+/*** Read-only-or-local envelope is preserved: no key material is accepted ***/
+/*** or emitted, nothing is written to PDM, and GP shared-key programming  ***/
+/*** remains unimplemented and unadvertised.                               ***/
+/****************************************************************************/
+
+#ifdef DIAG_HAVE_GP_COMMISSIONING
+PUBLIC void CUSTOMDIAG_vHandleGPCommission(uint16 u16Len, const uint8 *pu8Rx)
+{
+    uint8  u8ReqVersion;
+    uint32 u32TransactionId;
+    uint8  u8Action;
+    uint8  u8Timeout;
+    uint8  u8Length    = 0;
+    uint8  u8Status;
+    uint8  u8Mode;
+    uint8  u8Effective = 0;
+    uint8  u8GpStatus;
+
+    /* Strict fixed-length validation -> outer 0x8000 rejection, no 0x8D17. */
+    if (u16Len != DIAG_GP_COMMISSION_REQ_LEN)
+    {
+        vDiagSendStatus(E_SL_MSG_GP_COMMISSION_REQ,
+                        E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+
+    u8ReqVersion     = pu8Rx[0];
+    /* Big-endian u32, the same on-wire convention as the 0x0D0F nonce. A
+     * 32-bit id cannot wrap within the lifetime of a queued host request, so
+     * a late response can never be correlated to a later transaction. */
+    u32TransactionId = ZNC_RTN_U32(pu8Rx, 1);
+    u8Action         = pu8Rx[5];
+    u8Timeout        = pu8Rx[6];
+
+    if (u8ReqVersion != DIAG_REQ_VERSION)
+    {
+        vDiagSendStatus(E_SL_MSG_GP_COMMISSION_REQ,
+                        E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+
+    /* The transaction id is opaque: every 32-bit value is legal and is never
+     * interpreted here, only echoed. Rejecting values would make the host's
+     * free-running counter a shared protocol concern for no benefit. */
+
+    /* Strict action/timeout pairing: DISABLE requires timeout 0, ENABLE
+     * requires 1..255. Anything else is a host bug, not a runtime failure. */
+    if (u8Action == DIAG_GP_ACTION_DISABLE)
+    {
+        if (u8Timeout != 0U)
+        {
+            vDiagSendStatus(E_SL_MSG_GP_COMMISSION_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+    }
+    else if (u8Action == DIAG_GP_ACTION_ENABLE)
+    {
+        if ((u8Timeout < DIAG_GP_TIMEOUT_MIN) || (u8Timeout > DIAG_GP_TIMEOUT_MAX))
+        {
+            vDiagSendStatus(E_SL_MSG_GP_COMMISSION_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+    }
+    else
+    {
+        vDiagSendStatus(E_SL_MSG_GP_COMMISSION_REQ,
+                        E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+
+    /* Request is well-formed and dispatched: emit the stock success status,
+     * then the versioned response whose own status byte carries the outcome. */
+    vDiagSendStatus(E_SL_MSG_GP_COMMISSION_REQ, E_SL_MSG_STATUS_SUCCESS);
+
+    u8GpStatus = u8App_GP_SetProxyCommissioningMode(
+                     (bool_t)(u8Action == DIAG_GP_ACTION_ENABLE),
+                     u8Timeout,
+                     &u8Effective);
+
+    if (u8GpStatus == 0U)   /* E_ZCL_SUCCESS */
+    {
+        u8Status = DIAG_GP_COMMISSION_STATUS_OK;
+        u8Mode   = (u8Action == DIAG_GP_ACTION_ENABLE)
+                   ? DIAG_GP_MODE_COMMISSIONING
+                   : DIAG_GP_MODE_OPERATING;
+    }
+    else
+    {
+        /* The wrapper rolls the local state back on a failed enter and always
+         * closes the window on a failed exit request, so the honest effective
+         * mode after any failure is "operating". */
+        u8Status    = DIAG_GP_COMMISSION_STATUS_GP_ERROR;
+        u8Mode      = DIAG_GP_MODE_OPERATING;
+        u8Effective = 0;
+    }
+
+    /* The transaction id is echoed on EVERY response path reached from a
+     * structurally valid request, so the host can correlate a Green Power
+     * failure exactly as it correlates a success.
+     *
+     * status and gp_status are consistent by construction: OK is emitted only
+     * when the GP call returned E_ZCL_SUCCESS (0), and GP_ERROR only when it
+     * did not. The host enforces the same invariant on receive. */
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], DIAG_RSP_VERSION, u8Length );
+    ZNC_BUF_U32_UPD ( &s_au8DiagTx[ u8Length ], u32TransactionId, u8Length );
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Status,         u8Length );
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Mode,           u8Length );
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8Effective,      u8Length );
+    ZNC_BUF_U8_UPD  ( &s_au8DiagTx[ u8Length ], u8GpStatus,       u8Length );
+
+    vSL_WriteMessage(E_SL_MSG_GP_COMMISSION_RSP, u8Length, s_au8DiagTx, 0);
+}
+#endif /* DIAG_HAVE_GP_COMMISSIONING */
 
 /****************************************************************************/
 /***        END OF FILE                                                   ***/

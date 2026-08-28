@@ -374,10 +374,11 @@
 
 #define CLD_WINDOWCOVERING
 #define WINDOWCOVERING_CLIENT
-/* v2395 WindowCovering.{c,h} guard the client API on WINDOW_COVERING_CLIENT
- * (underscored) and gate the Lift/Tilt goto commands on CLD_WC_CMD_GO_TO_*.
- * Enable them so the v2395 client Send functions and axis payloads used by the
- * zcl_overlay/zigate_compat wrappers are declared and compiled. */
+/* The old app used CLD_WINDOWCOVERING/WINDOWCOVERING_CLIENT, while v2395
+ * WindowCovering.{c,h} use WINDOW_COVERING_CLIENT for the client shape.
+ * WindowCovering.o receives its additional CLD_WINDOW_COVERING source guard
+ * in the Makefile; defining that guard globally wrongly enables the unrelated
+ * ZHA Window Covering server device in this all-devices SDK build. */
 #define WINDOW_COVERING_CLIENT
 #define CLD_WC_CMD_GO_TO_LIFT_VALUE
 #define CLD_WC_CMD_GO_TO_LIFT_PERCENTAGE

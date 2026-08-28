@@ -47,6 +47,22 @@
 
 void vApp_GP_RegisterDevice(tfpZCL_ZCLCallBackFunction fptrEPCallBack);
 void vApp_GP_EnterCommissioningMode(void);
+
+/* Explicit, bounded local Green Power proxy commissioning control.
+ *
+ * bEnable == TRUE  : open the local proxy commissioning window for
+ *                    u8TimeoutSeconds (1..255) and broadcast ZGP Proxy
+ *                    Commissioning Mode (enter, exit-on-window-expiration).
+ * bEnable == FALSE : close the window immediately and broadcast the exit
+ *                    command; u8TimeoutSeconds is ignored.
+ *
+ * *pu8EffectiveTimeoutSeconds (optional) receives the window actually
+ * programmed, in seconds; 0 on failure or when disabling.
+ *
+ * Returns a teZCL_Status value (E_ZCL_SUCCESS == 0 on success). */
+uint8 u8App_GP_SetProxyCommissioningMode(bool_t  bEnable,
+                                         uint8   u8TimeoutSeconds,
+                                         uint8  *pu8EffectiveTimeoutSeconds);
 void vAPP_GP_LoadPDMData(void);
 void vHandleGreenPowerEvent(tsGP_GreenPowerCallBackMessage *psGPMessage);
 void vAPP_GP_ResetData(void);

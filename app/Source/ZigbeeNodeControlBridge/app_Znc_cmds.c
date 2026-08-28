@@ -579,6 +579,15 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             }
             break;
 
+#ifdef DIAG_HAVE_GP_COMMISSIONING
+            case (E_SL_MSG_GP_COMMISSION_REQ):
+            {
+                CUSTOMDIAG_vHandleGPCommission(u16PacketLength, au8LinkRxBuffer);
+                return;
+            }
+            break;
+#endif
+
             case (E_SL_MSG_SET_EXT_PANID):
             {
                 // If device type is 0(Coordinator) and network is already formed prevent changing EXT PANID

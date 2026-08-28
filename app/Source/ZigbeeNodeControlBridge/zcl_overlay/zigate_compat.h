@@ -91,14 +91,45 @@ PUBLIC teZCL_Status eCLD_WindowCoveringCommandGotoPercentageRequestSend(
 /*---------------------------------------------------------------------------*
  * Time server storage compatibility.
  *
- * OpenLumi kept a free-running UTC counter inside its (modified) ControlBridge
- * device struct as sTimeServerCluster. Stock v2395 control_bridge.h has no such
- * member. The counter is used only by the host GET/SET_TIMESERVER commands and
- * a 1 Hz increment — it is not a network-registered ZCL Time server — so a
- * standalone storage instance preserves behaviour exactly.
+ * OpenLumi kept a free-running UTC counter inside its modified ControlBridge.
+ * The app overlay registers this same storage as the endpoint-1 Time server,
+ * so host GET/SET, the 1 Hz increment, and network Time reads share one value.
+ *
+ * OWNERSHIP MODEL: the value is HOST-OWNED and READ-ONLY OVER ZIGBEE.
+ *   writers  : E_SL_MSG_SET_TIMESERVER (0x0016, UART host) and the 1 Hz
+ *              increment in app_start.c. Both write the struct directly and
+ *              never traverse the ZCL Write Attributes path.
+ *   readers  : E_SL_MSG_GET_TIMESERVER (0x0017, UART host) and remote ZCL
+ *              Read Attributes on endpoint 1 / cluster 0x000A.
+ *   rejected : remote ZCL Write Attributes on cluster 0x000A -> ZCL status
+ *              0x7e NOT_AUTHORIZED, refused BEFORE the attribute is mutated.
+ *
+ * Rationale: ZCL_Time declares E_ZCL_SECURITY_APPLINK, but zcl.c initialises
+ * psZCL_Common->eSecuritySupported to E_ZCL_SECURITY_NETWORK and the app never
+ * calls eZCL_SetSupportedSecurity(), so zcl_event.c clamps the cluster's
+ * requirement down to NETWORK. Without the veto below, ZclTime.h's
+ * (E_ZCL_AF_RD|E_ZCL_AF_WR) flags on Time/TimeStatus would let ANY node holding
+ * only the network key rewrite the clock the host reads back over 0x0017.
  *---------------------------------------------------------------------------*/
 #include "ZclTime.h"
 extern tsCLD_Time sZigateTimeServerCluster;
+
+/* Reject network-originated writes to the Time cluster.
+ *
+ * MUST be invoked unconditionally at the top of the endpoint callback, ahead of
+ * any RAW_MODE_ON host-forwarding early-return, otherwise raw mode silently
+ * bypasses authorization. Returns TRUE when a write was vetoed.
+ *
+ * E_ZCL_CBET_CHECK_ATTRIBUTE_RANGE is emitted from exactly one site in the SDK
+ * (zcl_WriteAttributesRequestHandle.c), i.e. only for remote Write Attributes
+ * requests, so this can never intercept a host SET or the 1 Hz increment. */
+PUBLIC bool_t bZigate_VetoRemoteTimeWrite(tsZCL_CallBackEvent *psEvent);
+
+#ifdef ZIGATE_CONTROL_BRIDGE_OVERLAY
+#include "control_bridge.h"
+PUBLIC teZCL_Status eZigate_CreateControlBridgeOverlay(
+    tsZLO_ControlBridgeDevice *psDeviceInfo);
+#endif
 
 /*---------------------------------------------------------------------------*
  * General cluster-id headers the OpenLumi handlers reference but the app did
@@ -110,17 +141,12 @@ extern tsCLD_Time sZigateTimeServerCluster;
 /*---------------------------------------------------------------------------*
  * APDU-pool usage diagnostics.
  *
- * OpenLumi reported APDU pool usage to the host (status/diagnostic messages)
- * via u8GetApduUse()/u8GetMaxApdu(). These were used but never defined in the
- * OpenLumi app (implicit declaration), which links against the *modified* PDUM.
- * Stock v2395 pdum_gen.c already provides the accurate primitives
- * PDUM_u16APduGetCrtUse()/PDUM_u16APduGetMaxUse() over the generated APDU pool
- * handle (apduZDP); these wrappers expose them with the OpenLumi signatures.
- *   u8GetApduUse()  -> APDU instances currently allocated (current use)
- *   u8GetMaxApdu()  -> APDU instances ever used (high-water mark)
+ * The prototypes live in zigate_apdu_diag.h (jendefs.h only, no other
+ * dependencies) so host-diagnostic translation units can declare them without
+ * pulling in the ZCL cluster world this header exposes. Declared there ONCE;
+ * do not restate them here.
  *---------------------------------------------------------------------------*/
-PUBLIC uint8 u8GetApduUse(void);
-PUBLIC uint8 u8GetMaxApdu(void);
+#include "zigate_apdu_diag.h"
 
 /*---------------------------------------------------------------------------*
  * OpenLumi private cluster extensions that depend on OpenLumi's *modified* SDK

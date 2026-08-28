@@ -426,6 +426,24 @@ PRIVATE void APP_ZCL_cbEndpointCallback ( tsZCL_CallBackEvent*    psEvent )
     uint16                 u16Length =  0;
     uint8                  au8LinkTxBuffer[256];
     uint8     				u8LinkQuality;
+
+    /* SECURITY: authorize BEFORE anything else in this callback.
+     *
+     * sZigateTimeServerCluster is host-owned and READ-ONLY OVER ZIGBEE: the
+     * endpoint-1 Time server (cluster 0x000A) is registered so remote Read
+     * Attributes works, but ZclTime.h marks Time/TimeStatus E_ZCL_AF_WR and the
+     * effective cluster security is clamped to E_ZCL_SECURITY_NETWORK, so any
+     * joined node could otherwise rewrite the clock the host reads back via
+     * E_SL_MSG_GET_TIMESERVER. bZigate_VetoRemoteTimeWrite() refuses the write
+     * with ZCL status 0x7e NOT_AUTHORIZED before the SDK mutates the attribute.
+     *
+     * This call MUST stay above the RAW_MODE_ON block below: that block
+     * forwards the indication to the host and returns early, which would
+     * otherwise skip authorization entirely whenever raw mode is on.
+     * scripts/check.sh enforces the ordering. Host SET and the 1 Hz increment
+     * write the struct directly and are not affected. */
+    (void)bZigate_VetoRemoteTimeWrite ( psEvent );
+
     u8LinkQuality=psEvent->pZPSevent->uEvent.sApsDataIndEvent.u8LinkQuality;
 
 
@@ -1433,6 +1451,18 @@ void vAPP_ZCL_DeviceSpecific_Init ( void )
  ****************************************************************************/
 teZCL_Status eApp_ZLO_RegisterEndpoint ( tfpZCL_ZCLCallBackFunction    fptr )
 {
+    teZCL_Status eStatus;
+
+    /*
+     * Initialise the app-only tail instances before the stock routine
+     * registers its sizeof-based, contiguous ControlBridge cluster array.
+     */
+    eStatus = eZigate_CreateControlBridgeOverlay(&sControlBridge);
+    if (eStatus != E_ZCL_SUCCESS)
+    {
+        return eStatus;
+    }
+
 /*
 #if defined(ZIGBEENODECONTROLBRIDGE_ORVIBO_ENDPOINT)
 	eZLO_RegisterControlBridgeEndPoint ( ZIGBEENODECONTROLBRIDGE_ORVIBO_ENDPOINT,

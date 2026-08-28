@@ -75,6 +75,11 @@
 
 #include "zps_struct.h"
 
+/* APDU-pool usage helpers (u8GetApduUse / u8GetMaxApdu). Minimal,
+ * dependency-free header; implicit declaration of these is forbidden in this
+ * file, which is compiled with -Werror=implicit-function-declaration. */
+#include "zigate_apdu_diag.h"
+
 #ifdef CLD_OTA
 #include "app_ota_server.h"
 #endif
