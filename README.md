@@ -59,9 +59,11 @@ Every build variable can be overridden from the environment (e.g.
 Reproducibility: the wrapper pins `LC_ALL=C`, `TZ=UTC`, and
 `SOURCE_DATE_EPOCH`.
 
-GitHub Actions runs `scripts/check.sh` to validate the public custom ABI and
-security invariants without the non-redistributable BA2 toolchain. Full
-firmware builds remain local until a licensed CI toolchain is available.
+GitHub Actions validates the public custom ABI and security invariants, then
+builds the complete firmware with the pinned Linux AMD64 toolchain from
+[`openlumi/BA2-toolchain`](https://github.com/openlumi/BA2-toolchain). The
+workflow verifies both the toolchain archive digest and the expected BIN/ELF
+hashes before publishing the build outputs as workflow artifacts.
 
 ## Provenance & licensing
 

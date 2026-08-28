@@ -1,0 +1,67 @@
+name: Firmware build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BA2_TOOLCHAIN_TAG: ba2-toolchain-a4de652
+  BA2_TOOLCHAIN_ARCHIVE: ba-elf-ba2-r36379-linux-amd64.tar.gz
+  BA2_TOOLCHAIN_SHA256: acfd927ccc6ecddf12a3fdf6b5fa28645a09bb7d2e48606f6d37628c15d15334
+  FIRMWARE_BASENAME: ZigbeeNodeControlBridge_JN5169_GP_Proxy_COORDINATOR_115200
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install generator dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install "xmltodict==0.13.0" lxml
+
+      - name: Download pinned BA2 toolchain
+        env:
+          TOOLCHAIN_URL: https://github.com/openlumi/BA2-toolchain/releases/download/${{ env.BA2_TOOLCHAIN_TAG }}/${{ env.BA2_TOOLCHAIN_ARCHIVE }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ba2-toolchain"
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/$BA2_TOOLCHAIN_ARCHIVE" \
+            "$TOOLCHAIN_URL"
+          echo "$BA2_TOOLCHAIN_SHA256  $RUNNER_TEMP/$BA2_TOOLCHAIN_ARCHIVE" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$BA2_TOOLCHAIN_ARCHIVE" \
+            -C "$RUNNER_TEMP/ba2-toolchain"
+
+      - name: Build firmware
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/ba2-toolchain
+        run: |
+          sh scripts/build.sh clean
+          sh scripts/build.sh all
+
+      - name: Verify firmware
+        working-directory: app/Build/ZigbeeNodeControlBridge
+        run: |
+          echo "e4f007969e248f04cd8b49694ed3019a00208c07ca2fa51aad1444af20d7a329  $FIRMWARE_BASENAME.bin" | sha256sum --check
+          echo "d903dc164dc6283b1dec9c751b8e58e725aaf4fe712e607e68942483eb2fcfda  $FIRMWARE_BASENAME.elf" | sha256sum --check
+          "$RUNNER_TEMP/ba2-toolchain/ba-elf-ba2/bin/ba-elf-size" "$FIRMWARE_BASENAME.elf"
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zigate-jn5169-gp-proxy-${{ github.sha }}
+          path: |
+            app/Build/ZigbeeNodeControlBridge/${{ env.FIRMWARE_BASENAME }}.bin
+            app/Build/ZigbeeNodeControlBridge/${{ env.FIRMWARE_BASENAME }}.elf
+            app/Build/ZigbeeNodeControlBridge/${{ env.FIRMWARE_BASENAME }}.map
+          if-no-files-found: error
+          retention-days: 14

@@ -56,8 +56,10 @@ Use `git log upstream/v2395..HEAD` to audit every local change.
 ## Toolchain (external, not vendored)
 
 - BA2 GCC `4.7.4`, GNU binutils `2.22` (`ba-elf-*`).
-- Expected at `$TOOLCHAIN_ROOT/ba-elf-ba2/bin/` (default points at the prior
-  session toolchain; override `TOOLCHAIN_ROOT`).
+- CI uses OpenLumi release `ba2-toolchain-a4de652`, Linux AMD64 archive SHA-256
+  `acfd927ccc6ecddf12a3fdf6b5fa28645a09bb7d2e48606f6d37628c15d15334`.
+- Expected at `$TOOLCHAIN_ROOT/ba-elf-ba2/bin/`; the local default is
+  `$HOME/toolchains/ba-elf-ba2/bin/`.
 - The SDK config generators (`Tools/{ZPSConfig,PDUMConfig}/Source/*`) are
   self-contained `sh`+`python3` scripts and require `python3` with
   `xmltodict==0.13.0` and `lxml`. A repo-local `.venv/` (gitignored) is used.

@@ -5,7 +5,6 @@
 # Repository layout (see docs/PROVENANCE.md):
 #   <repo>/                 JN-SW-4170 v2395 SDK (upstream history preserved)
 #   <repo>/app/             Application subtree (OpenLumi ZiGate ControlBridge)
-#   <repo>/patches/         OpenLumi + custom-diagnostic patch series
 #
 # Default build cell (overridable via environment):
 #   JN5169 / JN516x / COORDINATOR / BAUD=115200
@@ -21,7 +20,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ACTION=${1:-all}
 
 # --- External toolchain (override with TOOLCHAIN_ROOT=/path) ------------------
-TOOLCHAIN_ROOT=${TOOLCHAIN_ROOT:-/Users/afaronov/.copilot/session-state/fa547e9c-bb89-4a9a-91c5-40847d5d13c7/files/zigate-tclk-diagnostic-20260812/toolchain}
+TOOLCHAIN_ROOT=${TOOLCHAIN_ROOT:-$HOME/toolchains}
 TOOLCHAIN_PATH=${TOOLCHAIN_PATH:-ba-elf-ba2}
 if [ ! -x "$TOOLCHAIN_ROOT/$TOOLCHAIN_PATH/bin/ba-elf-gcc" ]; then
     echo "ERROR: BA2 toolchain not found at $TOOLCHAIN_ROOT/$TOOLCHAIN_PATH/bin/ba-elf-gcc" >&2
