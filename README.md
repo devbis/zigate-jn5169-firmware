@@ -62,8 +62,10 @@ Reproducibility: the wrapper pins `LC_ALL=C`, `TZ=UTC`, and
 GitHub Actions validates the public custom ABI and security invariants, then
 builds the complete firmware with the pinned Linux AMD64 toolchain from
 [`openlumi/BA2-toolchain`](https://github.com/openlumi/BA2-toolchain). The
-workflow verifies both the toolchain archive digest and the expected BIN/ELF
-hashes before publishing the build outputs as workflow artifacts.
+workflow verifies both the toolchain archive digest and the expected BIN hash
+before publishing the BIN, ELF, and map outputs as workflow artifacts.
+Only the flashable BIN is required to be byte-identical across build hosts;
+the ELF may contain host-dependent metadata.
 
 ## Provenance & licensing
 

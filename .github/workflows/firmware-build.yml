@@ -22,7 +22,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install generator dependencies
         run: |
@@ -52,7 +52,7 @@ jobs:
         working-directory: app/Build/ZigbeeNodeControlBridge
         run: |
           echo "e4f007969e248f04cd8b49694ed3019a00208c07ca2fa51aad1444af20d7a329  $FIRMWARE_BASENAME.bin" | sha256sum --check
-          echo "d903dc164dc6283b1dec9c751b8e58e725aaf4fe712e607e68942483eb2fcfda  $FIRMWARE_BASENAME.elf" | sha256sum --check
+          sha256sum "$FIRMWARE_BASENAME.elf"
           "$RUNNER_TEMP/ba2-toolchain/ba-elf-ba2/bin/ba-elf-size" "$FIRMWARE_BASENAME.elf"
 
       - name: Upload firmware artifacts
