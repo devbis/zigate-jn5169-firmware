@@ -45,7 +45,7 @@
  * cursor) and adds a physical table index to each group-list row, so it is not
  * wire-compatible with the never-released 1.0 draft.
  *
- * 1.2 (rev4) changes TX-power wire semantics: the stock 0x8806/0x8807 first
+ * 1.2 (rev4+) changes TX-power wire semantics: the stock 0x8806/0x8807 first
  * application byte and the custom general-diag (0x0D1F/0x8D1F) TX-power fields
  * now carry the canonical SIX-BIT code (GET & 0x3F) instead of the rev3 full
  * PIB byte with a phantom 0x40 tolerance bit, and SET rejects non-round-
@@ -76,8 +76,11 @@
  *          TCLK diagnostic feature (crypto-path --wrap interposition + internal
  *          security-state export) was REMOVED as security-sensitive; the three
  *          general-diag TCLK bytes are now always NA with TCLK_UNAVAILABLE set.
- *          Green Power coordinator RAM footprint reduced. */
-#define DIAG_BUILD_REVISION             (4U)
+ *          Green Power coordinator RAM footprint reduced.
+ *   rev 5: advertise Green Power commissioning only in builds that actually
+ *          include CLD_GREENPOWER. This is an additive capability bit; the
+ *          1.2 wire structures and command encodings are unchanged. */
+#define DIAG_BUILD_REVISION             (5U)
 
 /* Per-request structure version accepted by every request handler. */
 #define DIAG_REQ_VERSION                (1U)
@@ -94,6 +97,7 @@
 #define DIAG_CAP_BIT_GROUPS             (((uint64)1U) <<  0)
 #define DIAG_CAP_BIT_NEIGHBOURS         (((uint64)1U) <<  1)
 #define DIAG_CAP_BIT_ROUTES             (((uint64)1U) <<  2)
+#define DIAG_CAP_BIT_GP_COMMISSIONING   (((uint64)1U) <<  3)
 #define DIAG_CAP_BIT_TXPOWER            (((uint64)1U) <<  9)
 /* Negotiated coordinator manufacturer-code override command (0x0D16/0x8D16).
  * Set ONLY because this firmware implements CUSTOMDIAG_vHandleManufCode; a
@@ -102,11 +106,18 @@
 #define DIAG_CAP_BIT_MANUFCODE          (((uint64)1U) << 10)
 #define DIAG_CAP_BIT_DIAGNOSTICS        (((uint64)1U) << 14)
 
-#define DIAG_CAP_BITMAP                 ( DIAG_CAP_BIT_GROUPS      \
-                                        | DIAG_CAP_BIT_NEIGHBOURS  \
-                                        | DIAG_CAP_BIT_ROUTES      \
-                                        | DIAG_CAP_BIT_TXPOWER     \
-                                        | DIAG_CAP_BIT_MANUFCODE   \
+#ifdef CLD_GREENPOWER
+#define DIAG_CAP_GP_BITMAP              DIAG_CAP_BIT_GP_COMMISSIONING
+#else
+#define DIAG_CAP_GP_BITMAP              (((uint64)0U))
+#endif
+
+#define DIAG_CAP_BITMAP                 ( DIAG_CAP_BIT_GROUPS       \
+                                        | DIAG_CAP_BIT_NEIGHBOURS   \
+                                        | DIAG_CAP_BIT_ROUTES       \
+                                        | DIAG_CAP_GP_BITMAP        \
+                                        | DIAG_CAP_BIT_TXPOWER      \
+                                        | DIAG_CAP_BIT_MANUFCODE    \
                                         | DIAG_CAP_BIT_DIAGNOSTICS )
 
 /* 32-bit fold of the 64-bit capability bitmap. */

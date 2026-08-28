@@ -13,7 +13,8 @@ START=app/Source/ZigbeeNodeControlBridge/app_start.c
 
 grep -Eq '#define[[:space:]]+DIAG_PROTO_MAJOR[[:space:]]+\(1U\)' "$HEADER"
 grep -Eq '#define[[:space:]]+DIAG_PROTO_MINOR[[:space:]]+\(2U\)' "$HEADER"
-grep -Eq '#define[[:space:]]+DIAG_BUILD_REVISION[[:space:]]+\(4U\)' "$HEADER"
+grep -Eq '#define[[:space:]]+DIAG_BUILD_REVISION[[:space:]]+\(5U\)' "$HEADER"
+grep -Eq '#define[[:space:]]+DIAG_CAP_BIT_GP_COMMISSIONING[[:space:]]+\(\(\(uint64\)1U\)[[:space:]]*<<[[:space:]]*3\)' "$HEADER"
 grep -Eq 'E_SL_MSG_MANUFACTURER_CODE_REQ[[:space:]]*=[[:space:]]*0x0D16' "$SERIAL"
 grep -Eq 'E_SL_MSG_MANUFACTURER_CODE_RSP[[:space:]]*=[[:space:]]*0x8D16' "$SERIAL"
 

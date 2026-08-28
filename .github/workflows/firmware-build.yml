@@ -51,7 +51,7 @@ jobs:
       - name: Verify firmware
         working-directory: app/Build/ZigbeeNodeControlBridge
         run: |
-          echo "e4f007969e248f04cd8b49694ed3019a00208c07ca2fa51aad1444af20d7a329  $FIRMWARE_BASENAME.bin" | sha256sum --check
+          echo "3cf35d6edd18b87136168b7bf4c4d0cfa42a653f2c0be3f566c9c930e7475e72  $FIRMWARE_BASENAME.bin" | sha256sum --check
           sha256sum "$FIRMWARE_BASENAME.elf"
           "$RUNNER_TEMP/ba2-toolchain/ba-elf-ba2/bin/ba-elf-size" "$FIRMWARE_BASENAME.elf"
 

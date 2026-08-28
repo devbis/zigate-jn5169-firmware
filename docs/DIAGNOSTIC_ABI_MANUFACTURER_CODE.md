@@ -4,7 +4,7 @@ Status: **implemented in firmware C** against v2395 (the ControlBridge port
 compiles and links — see `MIGRATION_STATUS.md`). This document is the normative
 wire contract that the Go host (`adapter/zigate`, `zigbee/manager`) codes
 against, and that the firmware implements. The custom diagnostic protocol is at
-**proto 1.2 / build rev 4** (`custom_diag.h`).
+**proto 1.2 / build rev 5** (`custom_diag.h`).
 
 ## Rationale
 

@@ -17,17 +17,17 @@ The requested image **compiles and links**:
 WWAH=0). Two clean builds are **byte-identical** (`.bin` and `.elf`):
 
 ```
-bin sha256 e4f007969e248f04cd8b49694ed3019a00208c07ca2fa51aad1444af20d7a329
-elf sha256 d903dc164dc6283b1dec9c751b8e58e725aaf4fe712e607e68942483eb2fcfda
+bin sha256 3cf35d6edd18b87136168b7bf4c4d0cfa42a653f2c0be3f566c9c930e7475e72
+elf sha256 41396046cdec920b5a7774fcc29707a96c7a4c7b4683d7cbfa2abb33cdbd20e3
 text=252808  data=2032  bss=30157
 RAM headroom = 0x7fb4 - (_minimum_heap_end 0x664c + __stack_size 0x1770)
              = 32692 - 32188 = 504 bytes
 ```
 
-(Hashes above are for **proto 1.2 / build rev 4** after the independent-review
-fixes below. The pre-review rev4 image was
-`bin 0f314f98… / elf 4b5ef213…`; restoring the `E_SL_MSG_SET_EXT_PANID` case
-label re-included previously dead-code-eliminated handler code, +196 B text.
+(Hashes above are for **proto 1.2 / build rev 5** with negotiated Green Power
+commissioning. The flashable BIN was reproduced by two clean local builds.
+The rev4 image before the additive GP capability bit was
+`bin e4f00796… / elf d903dc16…`.
 The earlier rev3 image was `bin 7a878ca6… / elf 872b6d5d…`.)
 
 ### Independent-review fixes (applied before final build)
@@ -198,9 +198,13 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 3. Resolve Blocker A symbol deltas with validated mappings.
 4. Add protocol extensions and safety fixes as reviewable commits.
 
-## Diagnostic ABI — proto 1.2 / build rev 4
+## Diagnostic ABI — proto 1.2 / build rev 5
 
-- Protocol **1.2**, build **rev 4**; capability response `0x8D0F`.
+- Protocol **1.2**, build **rev 5**; capability response `0x8D0F`.
+- **Green Power commissioning** is capability bit `1 << 3` and is compiled into
+  the bitmap only when `CLD_GREENPOWER` is enabled. It permits the host to send
+  Proxy Commissioning Mode through endpoint 242. GP shared-key programming is
+  deliberately not advertised because no corresponding serial command exists.
 - **Canonical TX-power semantics (rev4)** — corrected from rev3 per the
   physical HIL + MiniMac disassembly: in the linked MiniMac path **0x40 is NOT
   round-trippable** (SET sign-extends the low 6 bits to 0; GET returns a
