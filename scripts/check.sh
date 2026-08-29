@@ -13,10 +13,220 @@ GP_SOURCE=app/Source/ZigbeeNodeControlBridge/app_green_power.c
 SERIAL=app/Source/ZigbeeNodeControlBridge/SerialLink.h
 MAKEFILE=app/Build/ZigbeeNodeControlBridge/Makefile
 START=app/Source/ZigbeeNodeControlBridge/app_start.c
+GENERAL_EVENTS=app/Source/ZigbeeNodeControlBridge/app_general_events_handler.c
 OVERLAY=app/Source/ZigbeeNodeControlBridge/zcl_overlay/zigate_compat.c
 OVERLAY_H=app/Source/ZigbeeNodeControlBridge/zcl_overlay/zigate_compat.h
 CONTROL_BRIDGE=Components/ZCL/Devices/ZLO/Include/control_bridge.h
 ZPSCFG=app/Source/ZigbeeNodeControlBridge/ZigbeeNodeControlBridgeCoordinator_GP_Proxy.zpscfg
+OCB_EXP_H=app/Source/ZigbeeNodeControlBridge/ocb_experimental.h
+OCB_EXP_C=app/Source/ZigbeeNodeControlBridge/ocb_experimental.c
+AHI=app/Source/ZigbeeNodeControlBridge/app_ahi_commands.c
+AHI_H=app/Source/ZigbeeNodeControlBridge/app_ahi_commands.h
+PDM_IDS=app/Source/ZigbeeNodeControlBridge/PDM_IDs.h
+BDB_STATE=Components/BDB/Source/Common/bdb_state_machine.c
+README=README.md
+MIGRATION=docs/MIGRATION_STATUS.md
+OCB_DOC=docs/OCB_UART_ABI.md
+
+# Coordinator TX power is an application-owned, versioned PDM setting. Keep
+# the native MiniMac validation set exact. Restoration is anchored to the
+# application-forwarded NWK_STARTED event, after BDB has consumed it, rather
+# than merely to AF init (the subsequent MLME start can reset PIB defaults).
+grep -Eq '^#define[[:space:]]+PDM_ID_APP_TX_POWER[[:space:]]+0x11$' "$PDM_IDS"
+if [ "$(grep -Ec '^#define[[:space:]]+PDM_ID_APP_[A-Z0-9_]+[[:space:]]+0x11$' "$PDM_IDS")" -ne 1 ]; then
+    echo "PDM application record 0x11 is not unique" >&2
+    exit 1
+fi
+grep -Eq '^#define[[:space:]]+APP_TX_POWER_RECORD_VERSION[[:space:]]+\(1U\)$' "$AHI"
+grep -q 'sRecord.u8Check == u8APP_AHITxPowerRecordCheck(&sRecord)' "$AHI"
+grep -q 'u16BytesRead == sizeof(sRecord)' "$AHI"
+grep -Eq 'u8TxPower <= 0x0A \|\|' "$AHI"
+grep -Eq 'u8TxPower >= 0x20 && u8TxPower <= 0x3F' "$AHI"
+grep -q 'PDM_eSaveRecordData(PDM_ID_APP_TX_POWER' "$AHI"
+grep -q 'APP_vAHIApplyPersistedTxPower' "$AHI_H"
+if grep -q 'TxPowerRestoreAttempted\|RestoreTxPowerOnce' "$AHI" "$AHI_H"; then
+    echo "TX-power application must not be suppressed after the first network start" >&2
+    exit 1
+fi
+grep -q 'if (!bAPP_AHIStoredTxPowerLoaded)' "$AHI"
+
+if grep -q 'APP_vAHIApplyPersistedTxPower' "$START"; then
+    echo "TX-power restore must not run at pre-MLME AF initialisation" >&2
+    exit 1
+fi
+NWK_STARTED=$(grep -n 'case ZPS_EVENT_NWK_STARTED:' "$GENERAL_EVENTS" | cut -d: -f1)
+TX_RESTORE=$(grep -n 'APP_vAHIApplyPersistedTxPower();' "$GENERAL_EVENTS" | cut -d: -f1)
+NEXT_STACK_CASE=$(grep -n 'case ZPS_EVENT_ERROR:' "$GENERAL_EVENTS" | cut -d: -f1)
+if [ -z "$NWK_STARTED" ] || [ -z "$TX_RESTORE" ] ||
+        [ -z "$NEXT_STACK_CASE" ] || [ "$TX_RESTORE" -le "$NWK_STARTED" ] ||
+        [ "$TX_RESTORE" -ge "$NEXT_STACK_CASE" ]; then
+    echo "TX-power restore is not anchored inside the NWK_STARTED event block" >&2
+    exit 1
+fi
+grep -B8 'APP_vAHIApplyPersistedTxPower();' "$GENERAL_EVENTS" \
+    | grep -q 'psStackEvent->eType == ZPS_EVENT_NWK_STARTED'
+if awk '
+    /PUBLIC void APP_vAHIApplyPersistedTxPower\(void\)/ { in_apply = 1 }
+    in_apply && /\/\*\*\*        Local Functions/ { exit }
+    in_apply && /PDM_eSaveRecordData|bAPP_AHISaveTxPower/ { found = 1 }
+    END { exit found ? 0 : 1 }
+' "$AHI"; then
+    echo "network-start TX-power application must never write PDM" >&2
+    exit 1
+fi
+awk '
+    /PUBLIC void bdb_taskBDB\(void\)/ { in_task = 1 }
+    in_task && /BDB_vNfStateMachine\(&sZpsAfEvent\)/ { state_machine = NR }
+    in_task && /APP_vBdbCallback\(&sBDBEvent\)/ {
+        forwarding = NR
+        exit
+    }
+    END {
+        if (!state_machine || !forwarding || state_machine >= forwarding)
+            exit 1
+    }
+' "$BDB_STATE" || {
+    echo "BDB no longer consumes formation state before application forwarding" >&2
+    exit 1
+}
+
+# One cached PDM load prevents recurring NWK_STARTED events and repeated SETs
+# from rereading flash. A valid equal record bypasses the save; invalid,
+# corrupt, or old records cannot set the valid-cache flag and are overwritten.
+if [ "$(grep -c 'PDM_eReadDataFromRecord(PDM_ID_APP_TX_POWER' "$AHI")" -ne 1 ]; then
+    echo "TX-power PDM record must have exactly one cached read site" >&2
+    exit 1
+fi
+grep -A4 'bAPP_AHILoadStoredTxPower(&u8StoredTxPower)' "$AHI" \
+    | grep -q 'u8StoredTxPower == u8TxPower'
+grep -A6 'u8StoredTxPower == u8TxPower' "$AHI" | grep -q 'return TRUE'
+
+# SET must read the old PIB before the short-circuited SET expression so every
+# post-mutation failure has a rollback value.
+grep -A3 'eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32OldTxPower)' "$AHI" \
+    | grep -q '&&'
+grep -A4 'eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32OldTxPower)' "$AHI" \
+    | grep -q 'eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower)'
+
+# Production OCB images must not dispatch the unauthenticated legacy raw-PDM
+# commands.  Development access is explicit, default-off, and the Makefile
+# must reject the insecure/production combination before compilation.
+grep -Eq '^INSECURE_DEV_RAW_PDM[[:space:]]*\?=[[:space:]]*0$' "$MAKEFILE"
+grep -Eq '^OCB_TYPED_SUPPORT[[:space:]]*\?=[[:space:]]*1$' "$MAKEFILE"
+grep -q 'ifdef INSECURE_DEV_RAW_PDM' "$ZNC_CMDS"
+grep -q 'INSECURE_DEV_RAW_PDM cannot be enabled with production OCB_TYPED_SUPPORT' "$MAKEFILE"
+
+RAW_PDM_CASES=$(grep -nE 'case E_SL_MSG_(DUMP_PDM_RECORD|RESTORE_PDM_RECORD_REQUEST|RESTORE_PDM_MODE)' "$ZNC_CMDS" | cut -d: -f1)
+for line in $RAW_PDM_CASES; do
+    awk -v target="$line" '
+        NR > target { exit }
+        /^[[:space:]]*#ifdef[[:space:]]+INSECURE_DEV_RAW_PDM[[:space:]]*$/ { gate = NR }
+        /^[[:space:]]*#endif/ { gate = 0 }
+        END { if (!gate) exit 1 }
+    ' "$ZNC_CMDS" || {
+        echo "raw PDM dispatch at $ZNC_CMDS:$line is not development-gated" >&2
+        exit 1
+    }
+done
+
+# Prove the build-system invariant itself, rather than only grepping its text.
+if make -s -C app/Build/ZigbeeNodeControlBridge \
+        OCB_TYPED_SUPPORT=1 INSECURE_DEV_RAW_PDM=1 -n all >/dev/null 2>&1; then
+    echo "Makefile accepted insecure raw PDM alongside production OCB" >&2
+    exit 1
+fi
+
+grep -Eq '^OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL[[:space:]]*\?=[[:space:]]*0$' "$MAKEFILE"
+grep -q 'experimental OCB cannot be combined with INSECURE_DEV_RAW_PDM' "$MAKEFILE"
+grep -q 'OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL requires OCB_TYPED_SUPPORT' "$MAKEFILE"
+grep -q 'APPSRC += ocb_experimental.c' "$MAKEFILE"
+grep -q 'ocb_experimental.o' "$MAKEFILE"
+
+for invalid in \
+    'OCB_TYPED_SUPPORT=1 INSECURE_DEV_RAW_PDM=1 OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1' \
+    'OCB_TYPED_SUPPORT=0 INSECURE_DEV_RAW_PDM=0 OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1'
+do
+    if make -s -C app/Build/ZigbeeNodeControlBridge $invalid -n all >/dev/null 2>&1; then
+        echo "Makefile accepted invalid experimental OCB combination: $invalid" >&2
+        exit 1
+    fi
+done
+
+# Experimental capability is default-off and cannot set the reserved
+# production-qualified BackupCapable bit.
+grep -Eq '#define[[:space:]]+DIAG_CAP_BIT_OCB_EXPERIMENTAL_KEYS[[:space:]]+\(\(\(uint64\)1U\)[[:space:]]*<<[[:space:]]*16\)' "$HEADER"
+grep -Eq '#define[[:space:]]+DIAG_CAP_BIT_OCB_BACKUP_QUALIFIED[[:space:]]+\(\(\(uint64\)1U\)[[:space:]]*<<[[:space:]]*17\)' "$HEADER"
+grep -A1 -E '^#ifdef[[:space:]]+OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL$' "$HEADER" \
+    | grep -Eq '^#define[[:space:]]+DIAG_CAP_OCB_EXPERIMENTAL_BITMAP[[:space:]]+DIAG_CAP_BIT_OCB_EXPERIMENTAL_KEYS$'
+if grep -Eq 'DIAG_CAP_BITMAP.*OCB_BACKUP_QUALIFIED|DIAG_CAP_OCB_EXPERIMENTAL_BITMAP.*OCB_BACKUP_QUALIFIED' "$HEADER"; then
+    echo "unqualified OCB build advertises production BackupCapable" >&2
+    exit 1
+fi
+
+# No reusable secret or false authentication claim: the confirmation is a
+# public nonce/transaction/magic relation and the limitation bit is mandatory.
+grep -q 'OCBEXP_CONFIRM_MAGIC' "$OCB_EXP_H"
+grep -q 'The nonce confirmation is an accidental-invocation guard' "$OCB_EXP_H"
+grep -q 'OCBEXP_LIMIT_NO_AUTH_OR_ENCRYPTION' "$OCB_EXP_H"
+grep -q 'OCBEXP_LIMIT_FLASH_TCLK_COUNTERS' "$OCB_EXP_H"
+grep -q 'OCBEXP_STATUS_RESTORE_UNSUPPORTED' "$OCB_EXP_C"
+grep -q 'vExpWipe(au8NwkKey' "$OCB_EXP_C"
+grep -q 'vExpWipe(au8TcKey' "$OCB_EXP_C"
+grep -q 'vExpWipe(&uFlashKey' "$OCB_EXP_C"
+
+# Publication docs must track the exact default gates, negotiation constants,
+# every typed OCB opcode pair, and the explicit lack of restore qualification.
+grep -q 'OCB_TYPED_SUPPORT=1' "$README"
+grep -q 'OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=0' "$README"
+grep -q 'INSECURE_DEV_RAW_PDM=0' "$README"
+grep -qi '0x000000000000c60f' "$OCB_DOC"
+grep -qi 'DIAG_FW_BUILD_ID=0x0101c525' "$OCB_DOC"
+grep -q 'Reserved diagnostic bit 17' "$OCB_DOC"
+grep -q 'status `5 RESTORE_UNSUPPORTED`' "$OCB_DOC"
+for opcode in 18 19 1A 1B 1C 20 21 22 23 24 25 26 27 28 29 2A
+do
+    grep -qi "0x0D$opcode.*0x8D$opcode" "$OCB_DOC" || {
+        echo "OCB documentation is missing opcode pair 0x0D$opcode/0x8D$opcode" >&2
+        exit 1
+    }
+done
+grep -q 'PDM_ID_APP_TX_POWER' "$MIGRATION"
+grep -q 'native signed six-bit MiniMac codes' "$README"
+grep -q 'native signed six-bit MiniMac codes' "$MIGRATION"
+grep -q 'f17777bec16acd8f1586e56d5a3695f12c381603f634fee15f26859d7d1be6e0' "$README"
+grep -q 'f17777bec16acd8f1586e56d5a3695f12c381603f634fee15f26859d7d1be6e0' "$MIGRATION"
+grep -q '244-byte linker' "$OCB_DOC"
+
+# Exact generated v2395 legacy assumptions used for default-TC incoming
+# counter indexing and table enumeration.
+grep -Eq 's_keyPairTableStorage\[4\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
+grep -Eq 'au32IncomingFrameCounter\[4\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
+grep -Eq 's_keyPairTable = \{ s_keyPairTableStorage, 1 \}' app/Source/ZigbeeNodeControlBridge/zps_gen.c
+grep -Eq 'psAplDefaultTCAPSLinkKey;|psAplDefaultTCAPSLinkKey' Components/ZPSAPL/Include/zps_apl_aib.h
+grep -Eq 's_asNwkSecMatSet\[2\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
+grep -Eq 's_asTrustCenterDeviceTable\[36\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
+
+# Typed OCB is additive, bounded, correlated, and cannot accidentally advertise
+# key export or restore. The only key-by-EUI operation is an explicit
+# unavailable response with a zero key length.
+grep -Eq '#define[[:space:]]+E_SL_MSG_OCB_EXPORT_BEGIN_REQ[[:space:]]+\(0x0D18U\)' "$HEADER"
+grep -Eq '#define[[:space:]]+E_SL_MSG_OCB_STATUS_RSP[[:space:]]+\(0x8D1CU\)' "$HEADER"
+grep -Eq '#define[[:space:]]+OCB_CAP_BITMAP[[:space:]]+\(OCB_CAP_EXPORT_CORE \| OCB_CAP_STATUS_DIGEST\)' "$HEADER"
+grep -A1 -E '^#ifdef[[:space:]]+OCB_TYPED_SUPPORT$' "$HEADER" \
+    | grep -Eq '^#define[[:space:]]+DIAG_CAP_OCB_BITMAP[[:space:]]+DIAG_CAP_BIT_OCB_METADATA_EXPORT$'
+grep -q 'CUSTOMDIAG_vHandleOcbExportBegin' "$DIAG"
+grep -q 'CUSTOMDIAG_vHandleOcbExportCore' "$DIAG"
+grep -q 'CUSTOMDIAG_vHandleOcbExportLinkKey' "$DIAG"
+grep -q 'CUSTOMDIAG_vHandleOcbExportEnd' "$DIAG"
+grep -q 'CUSTOMDIAG_vHandleOcbStatus' "$DIAG"
+grep -q 'OCB_STATUS_FIELD_UNAVAILABLE' "$DIAG"
+grep -Eq 'ZNC_BUF_U8_UPD\(&s_au8DiagTx\[u8Length\],[[:space:]]*0U,[[:space:]]*u8Length\); /\* no key bytes \*/' "$DIAG"
+grep -q 'memset(&s_sOcbExport, 0, sizeof(s_sOcbExport))' "$DIAG"
+
+if grep -Eq '#define[[:space:]]+OCB_CAP_BITMAP.*(OCB_CAP_LINK_KEYS|OCB_CAP_RESTORE)' "$HEADER"; then
+    echo "export-only OCB must not advertise link-key or restore support" >&2
+    exit 1
+fi
 
 grep -Eq '#define[[:space:]]+DIAG_PROTO_MAJOR[[:space:]]+\(1U\)' "$HEADER"
 grep -Eq '#define[[:space:]]+DIAG_PROTO_MINOR[[:space:]]+\(2U\)' "$HEADER"

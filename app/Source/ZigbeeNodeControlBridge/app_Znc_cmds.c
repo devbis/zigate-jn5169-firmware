@@ -80,6 +80,9 @@
 #include "ApplianceStatistics.h"
 #include "bdb_DeviceCommissioning.h"
 #include "custom_diag.h"
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+#include "ocb_experimental.h"
+#endif
 
 //FRED IASWD
 #include "IASWD.h"
@@ -275,8 +278,10 @@ PRIVATE void APP_vUpdateReportableChange( tuZCL_AttributeReportable *puAttribute
 #ifdef PDM_DEBUG
 PRIVATE void APP_CustomPDMDebug( void );
 #endif
+#ifdef INSECURE_DEV_RAW_PDM
 PRIVATE void dump_PDM(uint8 *pu8LinkRxBuffer, uint16 u16PacketLength);
 PRIVATE void restore_PDM(uint8 *pu8LinkRxBuffer, uint16 u16PacketLength);
+#endif
 
 /****************************************************************************/
 /***    Exported Variables                        ***/
@@ -586,6 +591,75 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                 return;
             }
             break;
+#endif
+
+#ifdef OCB_TYPED_SUPPORT
+            case (E_SL_MSG_OCB_EXPORT_BEGIN_REQ):
+                CUSTOMDIAG_vHandleOcbExportBegin(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case (E_SL_MSG_OCB_EXPORT_CORE_REQ):
+                CUSTOMDIAG_vHandleOcbExportCore(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case (E_SL_MSG_OCB_EXPORT_LINK_KEY_REQ):
+                CUSTOMDIAG_vHandleOcbExportLinkKey(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case (E_SL_MSG_OCB_EXPORT_END_REQ):
+                CUSTOMDIAG_vHandleOcbExportEnd(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case (E_SL_MSG_OCB_STATUS_REQ):
+                CUSTOMDIAG_vHandleOcbStatus(u16PacketLength, au8LinkRxBuffer);
+                return;
+#endif
+
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+            case E_SL_MSG_OCBEXP_CHALLENGE_REQ:
+                OCBEXP_vHandleChallenge(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_UNLOCK_REQ:
+                OCBEXP_vHandleUnlock(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_SECRET_CORE_REQ:
+                OCBEXP_vHandleSecretCore(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_LINK_KEY_REQ:
+                OCBEXP_vHandleLinkKey(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_RESTORE_BEGIN_REQ:
+                OCBEXP_vHandleRestoreUnavailable(
+                    E_SL_MSG_OCBEXP_RESTORE_BEGIN_REQ,
+                    E_SL_MSG_OCBEXP_RESTORE_BEGIN_RSP,
+                    u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_RESTORE_CORE_REQ:
+                OCBEXP_vHandleRestoreUnavailable(
+                    E_SL_MSG_OCBEXP_RESTORE_CORE_REQ,
+                    E_SL_MSG_OCBEXP_RESTORE_CORE_RSP,
+                    u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_RESTORE_LINK_REQ:
+                OCBEXP_vHandleRestoreUnavailable(
+                    E_SL_MSG_OCBEXP_RESTORE_LINK_REQ,
+                    E_SL_MSG_OCBEXP_RESTORE_LINK_RSP,
+                    u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_VALIDATE_REQ:
+                OCBEXP_vHandleRestoreUnavailable(
+                    E_SL_MSG_OCBEXP_VALIDATE_REQ,
+                    E_SL_MSG_OCBEXP_VALIDATE_RSP,
+                    u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_COMMIT_REQ:
+                OCBEXP_vHandleRestoreUnavailable(
+                    E_SL_MSG_OCBEXP_COMMIT_REQ,
+                    E_SL_MSG_OCBEXP_COMMIT_RSP,
+                    u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_STATUS_REQ:
+                OCBEXP_vHandleStatus(u16PacketLength, au8LinkRxBuffer);
+                return;
+            case E_SL_MSG_OCBEXP_ABORT_REQ:
+                OCBEXP_vHandleAbort(u16PacketLength, au8LinkRxBuffer);
+                return;
 #endif
 
             case (E_SL_MSG_SET_EXT_PANID):
@@ -2756,6 +2830,9 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
 
 
 #endif
+#ifdef INSECURE_DEV_RAW_PDM
+            /* SECURITY: development-only arbitrary PDM access.  Production
+             * OCB builds fail in the Makefile if this switch is enabled. */
             case E_SL_MSG_DUMP_PDM_RECORD:
             {
             	dump_PDM(au8LinkRxBuffer, u16PacketLength);
@@ -2776,6 +2853,7 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                 ZTIMER_eStart( u8IdTimer, ZTIMER_TIME_MSEC ( 1 ) );
             }
             break;
+#endif
             default:
                     u8Status = E_SL_MSG_STATUS_UNHANDLED_COMMAND;
             break;
@@ -2810,6 +2888,7 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
 
 }
 
+#ifdef INSECURE_DEV_RAW_PDM
 PRIVATE void dump_PDM( uint8 *pu8LinkRxBuffer,
                        uint16 u16PacketLength )
 {
@@ -2914,6 +2993,7 @@ PRIVATE void restore_PDM(uint8 *pu8LinkRxBuffer, uint16 u16PacketLength)
 
     vSL_WriteMessage ( E_SL_MSG_RESTORE_PDM_RECORD_RESPONSE, 2, tmp, 0 );
 }
+#endif /* INSECURE_DEV_RAW_PDM */
 /****************************************************************************
  *
  * NAME: APP_eZclBasicResetToFactoryDefaults

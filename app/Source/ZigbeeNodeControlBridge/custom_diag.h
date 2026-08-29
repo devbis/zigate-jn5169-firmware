@@ -3,13 +3,15 @@
  * MODULE:  custom_diag.h
  *
  * DESCRIPTION:
- *   Compact, versioned, read-only UART diagnostic extension for the ZiGate
- *   JN5169 ZigbeeNodeControlBridge coordinator firmware.
+ *   Compact, versioned UART diagnostic and bounded local-control extension
+ *   for the ZiGate JN5169 ZigbeeNodeControlBridge coordinator firmware.
  *
  *   This module is strictly additive. It does not modify, replace or expand
- *   any stock SerialLink command, and it never exposes key material, allows
- *   mutation of network identity, or performs raw PDM / credential-flash
- *   access. Only the following capabilities are implemented and advertised:
+ *   any stock SerialLink command and never performs raw PDM or credential-
+ *   flash access. The production/default build exposes no key material.
+ *   Mutating operations are limited to the explicitly negotiated local APS
+ *   group, Node Descriptor manufacturer-code, and GP commissioning controls.
+ *   Only the following capabilities are implemented and advertised:
  *
  *     - Capability negotiation           (0x0D0F / 0x8D0F)
  *     - General read-only diagnostics    (0x0D1F / 0x8D1F)
@@ -17,7 +19,9 @@
  *     - Paginated local route table      (0x0D15 / 0x8D15)
  *     - Local APS group operation        (0x0D12 / 0x8D12)
  *     - Local APS group paginated list   (0x0D13 / 0x8D13)
+ *     - Node Descriptor manufacturer code (0x0D16 / 0x8D16)
  *     - Local GP proxy commissioning     (0x0D17 / 0x8D17)
+ *     - Typed OCB metadata export        (0x0D18..0x0D1C)
  *
  *   All wire fields are serialised individually in big-endian order using the
  *   ZNC_BUF_* macros. No C structure is ever cast onto the wire, so the wire
@@ -157,7 +161,12 @@
  *          this touches no host wire encoding, no capability bit and no
  *          protocol field, so it did not warrant a rev10 - and rev9 was never
  *          flashed or published, so it was folded in place exactly as the
- *          superseded rev8 draft was. */
+ *          superseded rev8 draft was.
+ *
+ *   The additive OCB metadata-export subset remains protocol 1.2 / rev9 for
+ *   stock compatibility. Its separately negotiated capability bit changes
+ *   DIAG_FW_BUILD_ID, so hosts can distinguish this image without changing
+ *   any previously shipped command layout. */
 #define DIAG_BUILD_REVISION             (9U)
 
 /* Per-request structure version accepted by every request handler. */
@@ -170,8 +179,10 @@
  * the deterministic build id below cannot silently drift. */
 #define DIAG_FW_VERSION                 (0x00030323UL)
 
-/* Capability bitmap. Advertise ONLY implemented, read-only-or-local
- * capabilities. No security, key, PDM-dump/restore or mutation bits exist. */
+/* Capability bitmap. Advertise only implemented diagnostic or bounded-local
+ * capabilities. The default build has no key or restore bit. The explicit
+ * experimental build may add key-export bit 16, but raw-PDM and qualified
+ * Backup/Restore bit 17 are never included. */
 #define DIAG_CAP_BIT_GROUPS             (((uint64)1U) <<  0)
 #define DIAG_CAP_BIT_NEIGHBOURS         (((uint64)1U) <<  1)
 #define DIAG_CAP_BIT_ROUTES             (((uint64)1U) <<  2)
@@ -183,6 +194,11 @@
  * to zigbee.ErrUnsupported. */
 #define DIAG_CAP_BIT_MANUFCODE          (((uint64)1U) << 10)
 #define DIAG_CAP_BIT_DIAGNOSTICS        (((uint64)1U) << 14)
+#define DIAG_CAP_BIT_OCB_METADATA_EXPORT (((uint64)1U) << 15)
+#define DIAG_CAP_BIT_OCB_EXPERIMENTAL_KEYS (((uint64)1U) << 16)
+/* Reserved production-qualified BackupCapable bit. It MUST remain clear until
+ * complete restore and HIL qualification exist. */
+#define DIAG_CAP_BIT_OCB_BACKUP_QUALIFIED (((uint64)1U) << 17)
 
 /* Green Power proxy commissioning (0x0D17/0x8D17) is built only when the GP
  * cluster itself is compiled in. DIAG_HAVE_GP_COMMISSIONING is the single
@@ -201,13 +217,27 @@
 #define DIAG_CAP_GP_BITMAP              (((uint64)0U))
 #endif
 
+#ifdef OCB_TYPED_SUPPORT
+#define DIAG_CAP_OCB_BITMAP             DIAG_CAP_BIT_OCB_METADATA_EXPORT
+#else
+#define DIAG_CAP_OCB_BITMAP             (((uint64)0U))
+#endif
+
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+#define DIAG_CAP_OCB_EXPERIMENTAL_BITMAP DIAG_CAP_BIT_OCB_EXPERIMENTAL_KEYS
+#else
+#define DIAG_CAP_OCB_EXPERIMENTAL_BITMAP (((uint64)0U))
+#endif
+
 #define DIAG_CAP_BITMAP                 ( DIAG_CAP_BIT_GROUPS       \
                                         | DIAG_CAP_BIT_NEIGHBOURS   \
                                         | DIAG_CAP_BIT_ROUTES       \
                                         | DIAG_CAP_GP_BITMAP        \
                                         | DIAG_CAP_BIT_TXPOWER      \
                                         | DIAG_CAP_BIT_MANUFCODE    \
-                                        | DIAG_CAP_BIT_DIAGNOSTICS )
+                                        | DIAG_CAP_BIT_DIAGNOSTICS  \
+                                        | DIAG_CAP_OCB_BITMAP       \
+                                        | DIAG_CAP_OCB_EXPERIMENTAL_BITMAP )
 
 /* 32-bit fold of the 64-bit capability bitmap. */
 #define DIAG_CAP_FOLD32 \
@@ -380,6 +410,77 @@
 #define DIAG_GP_COMMISSION_STATUS_OK        (0U)
 #define DIAG_GP_COMMISSION_STATUS_GP_ERROR  (1U)
 
+/* Typed Open Coordinator Backup extension.
+ *
+ * This production implementation is intentionally EXPORT-ONLY and does not
+ * claim full Open Coordinator Backup / BackupCapable support.  It snapshots
+ * typed, non-secret coordinator metadata and the authoritative live NWK
+ * outgoing frame counter.  Network and APS link keys are explicitly reported
+ * unavailable; no PDM record, serialized C structure, arbitrary memory, or
+ * arbitrary address lookup is exposed. Coordinator and Trust Center IEEE
+ * addresses are intentional typed metadata fields. Key-bearing export/import
+ * remains absent from this production/default subset until a
+ * board-specific physical-presence design and authenticated encryption can be
+ * implemented inside the measured RAM margin.
+ *
+ * All integers are big-endian.  Every request starts:
+ *   abi_version[1] schema_version[1] transaction_id[4] session_id[4]
+ * EXPORT_BEGIN omits session_id and allocates it in the response.
+ */
+#define OCB_ABI_VERSION                 (1U)
+#define OCB_SCHEMA_VERSION              (1U)
+#define E_SL_MSG_OCB_EXPORT_BEGIN_REQ   (0x0D18U)
+#define E_SL_MSG_OCB_EXPORT_BEGIN_RSP   (0x8D18U)
+#define E_SL_MSG_OCB_EXPORT_CORE_REQ    (0x0D19U)
+#define E_SL_MSG_OCB_EXPORT_CORE_RSP    (0x8D19U)
+#define E_SL_MSG_OCB_EXPORT_LINK_KEY_REQ (0x0D1AU)
+#define E_SL_MSG_OCB_EXPORT_LINK_KEY_RSP (0x8D1AU)
+#define E_SL_MSG_OCB_EXPORT_END_REQ     (0x0D1BU)
+#define E_SL_MSG_OCB_EXPORT_END_RSP     (0x8D1BU)
+#define E_SL_MSG_OCB_STATUS_REQ         (0x0D1CU)
+#define E_SL_MSG_OCB_STATUS_RSP         (0x8D1CU)
+#define OCB_COMMON_REQ_LEN              (10U)
+#define OCB_BEGIN_REQ_LEN               (6U)
+#define OCB_LINK_REQ_LEN                (18U)
+#define OCB_BEGIN_RSP_LEN               (19U)
+#define OCB_CORE_RSP_LEN                (55U)
+#define OCB_LINK_RSP_LEN                (24U)
+#define OCB_END_RSP_LEN                 (16U)
+#define OCB_STATUS_RSP_LEN              (20U)
+
+#define OCB_STATUS_OK                   (0U)
+#define OCB_STATUS_BAD_VERSION          (1U)
+#define OCB_STATUS_BAD_LENGTH           (2U) /* reserved; outer status handles malformed length */
+#define OCB_STATUS_NO_SESSION           (3U)
+#define OCB_STATUS_SESSION_MISMATCH      (4U)
+#define OCB_STATUS_FIELD_UNAVAILABLE     (5U)
+#define OCB_STATUS_BUSY                 (6U)
+
+/* Capability bits are deliberately narrower than BackupCapable. */
+#define OCB_CAP_EXPORT_CORE             (1UL << 0)
+#define OCB_CAP_STATUS_DIGEST           (1UL << 1)
+#define OCB_CAP_LINK_KEYS               (1UL << 2) /* always clear */
+#define OCB_CAP_RESTORE                 (1UL << 3) /* always clear */
+#define OCB_CAP_PHYSICAL_UNLOCK         (1UL << 4) /* always clear */
+#define OCB_CAP_BITMAP                  (OCB_CAP_EXPORT_CORE | OCB_CAP_STATUS_DIGEST)
+
+/* Per-field validity bits in BEGIN/CORE/STATUS.  A clear bit means unavailable,
+ * never a synthesised default. */
+#define OCB_FIELD_COORD_IEEE            (1UL << 0)
+#define OCB_FIELD_PAN_ID                (1UL << 1)
+#define OCB_FIELD_EXT_PAN_ID            (1UL << 2)
+#define OCB_FIELD_CHANNEL               (1UL << 3)
+#define OCB_FIELD_CHANNEL_MASK          (1UL << 4)
+#define OCB_FIELD_NWK_UPDATE_ID         (1UL << 5)
+#define OCB_FIELD_SECURITY_LEVEL        (1UL << 6)
+#define OCB_FIELD_NWK_KEY_SEQUENCE      (1UL << 7)
+#define OCB_FIELD_NWK_OUT_COUNTER       (1UL << 8)
+#define OCB_FIELD_APS_TC_ADDRESS        (1UL << 9)
+#define OCB_FIELD_APS_STATE             (1UL << 10)
+#define OCB_FIELD_NETWORK_KEY           (1UL << 16) /* always clear */
+#define OCB_FIELD_LINK_KEYS             (1UL << 17) /* always clear */
+#define OCB_FIELD_APS_COUNTERS           (1UL << 18) /* always clear */
+
 /****************************************************************************/
 /***        Sentinels                                                     ***/
 /****************************************************************************/
@@ -417,6 +518,8 @@ DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, gp_rsp_fit
 DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_REQ_LEN == 7U, gp_req_len);
 DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_RSP_LEN == 9U, gp_rsp_len);
 DIAG_STATIC_ASSERT(DIAG_GP_TIMEOUT_MAX <= 0xFFU, gp_timeout_fits_u8);
+DIAG_STATIC_ASSERT(OCB_CORE_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, ocb_core_fits);
+DIAG_STATIC_ASSERT(OCB_LINK_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, ocb_link_fits);
 /* The advertised endpoint-number space fits the group endpoint bitmap. */
 DIAG_STATIC_ASSERT(DIAG_GROUP_LIST_MAX_ENDPOINTS <= 242U, group_ep_cap);
 
@@ -437,6 +540,13 @@ PUBLIC void CUSTOMDIAG_vHandleGroupList(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleManufCode(uint16 u16Len, const uint8 *pu8Rx);
 #ifdef DIAG_HAVE_GP_COMMISSIONING
 PUBLIC void CUSTOMDIAG_vHandleGPCommission(uint16 u16Len, const uint8 *pu8Rx);
+#endif
+#ifdef OCB_TYPED_SUPPORT
+PUBLIC void CUSTOMDIAG_vHandleOcbExportBegin(uint16 u16Len, const uint8 *pu8Rx);
+PUBLIC void CUSTOMDIAG_vHandleOcbExportCore(uint16 u16Len, const uint8 *pu8Rx);
+PUBLIC void CUSTOMDIAG_vHandleOcbExportLinkKey(uint16 u16Len, const uint8 *pu8Rx);
+PUBLIC void CUSTOMDIAG_vHandleOcbExportEnd(uint16 u16Len, const uint8 *pu8Rx);
+PUBLIC void CUSTOMDIAG_vHandleOcbStatus(uint16 u16Len, const uint8 *pu8Rx);
 #endif
 
 #endif /* CUSTOM_DIAG_H_ */

@@ -32,6 +32,7 @@
 #include "SerialLink.h"
 #include "app_common.h"
 #include "AppHardwareApi.h"
+#include "PDM.h"
 #include "dbg.h"
 #include "app_ahi_commands.h"
 
@@ -39,10 +40,24 @@
 /***        Macro Definitions                                             ***/
 /****************************************************************************/
 
+#define APP_TX_POWER_RECORD_MAGIC_0       (0x54U) /* 'T' */
+#define APP_TX_POWER_RECORD_MAGIC_1       (0x58U) /* 'X' */
+#define APP_TX_POWER_RECORD_VERSION       (1U)
+#define APP_TX_POWER_RECORD_CRC_SEED      (0xFFU)
+#define APP_TX_POWER_RECORD_CRC_POLY      (0x07U)
+
 /****************************************************************************/
 /***        Type Definitions                                              ***/
 /****************************************************************************/
 
+typedef struct
+{
+    uint8 u8Magic0;
+    uint8 u8Magic1;
+    uint8 u8Version;
+    uint8 u8TxPower;
+    uint8 u8Check;
+} tsAPP_TxPowerRecord;
 
 /****************************************************************************/
 /***        Local Function Prototypes                                     ***/
@@ -52,6 +67,10 @@ PRIVATE void vAPP_DIOSetOutput(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, e
 PRIVATE void vAPP_DIOSetReadInput(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, eAHI_Status *peAHIStatus);
 PRIVATE void vAPP_AHISetTxPower(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, eAHI_Status *peAHIStatus);
 PRIVATE void vAPP_AHIGetTxPower(uint32 *u32TxPower, eAHI_Status *peAHIStatus);
+PRIVATE bool_t bAPP_AHIIsValidTxPower(uint8 u8TxPower);
+PRIVATE uint8 u8APP_AHITxPowerRecordCheck(const tsAPP_TxPowerRecord *psRecord);
+PRIVATE bool_t bAPP_AHILoadStoredTxPower(uint8 *pu8TxPower);
+PRIVATE bool_t bAPP_AHISaveTxPower(uint8 u8TxPower);
 /****************************************************************************/
 /***        Exported Variables                                            ***/
 /****************************************************************************/
@@ -59,6 +78,10 @@ PRIVATE void vAPP_AHIGetTxPower(uint32 *u32TxPower, eAHI_Status *peAHIStatus);
 /****************************************************************************/
 /***        Local Variables                                               ***/
 /****************************************************************************/
+
+PRIVATE bool_t bAPP_AHIStoredTxPowerLoaded;
+PRIVATE bool_t bAPP_AHIStoredTxPowerValid;
+PRIVATE uint8 u8APP_AHIStoredTxPower;
 
 /****************************************************************************/
 /***        Exported Functions                                            ***/
@@ -118,9 +141,143 @@ PUBLIC uint32 APP_vCMDHandleAHICommand(uint16 u16PacketType,
     return u32AHI_response;
 }
 
+/****************************************************************************
+ *
+ * NAME: APP_vAHIApplyPersistedTxPower
+ *
+ * DESCRIPTION:
+ * Reapplies the application-owned TX-power PIB on every NWK_STARTED event.
+ * BDB has processed that event before forwarding it to the application, so
+ * the associated MLME reset/default-PIB work is complete. The validated PDM
+ * record is cached, so later events neither reread nor write PDM.
+ *
+ ****************************************************************************/
+PUBLIC void APP_vAHIApplyPersistedTxPower(void)
+{
+    uint8 u8TxPower;
+    uint32 u32OldTxPower;
+    uint32 u32ReadBack;
+
+    if (!bAPP_AHILoadStoredTxPower(&u8TxPower) ||
+        eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32OldTxPower) !=
+            PHY_ENUM_SUCCESS)
+    {
+        return;
+    }
+
+    if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS &&
+        eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32ReadBack) ==
+            PHY_ENUM_SUCCESS &&
+        (uint8)(u32ReadBack & PHY_PIB_TX_POWER_MASK) == u8TxPower)
+    {
+        DBG_vPrintf(TRUE, "AHI: applied persisted TX power 0x%02x",
+                    u8TxPower);
+    }
+    else
+    {
+        (void)eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u32OldTxPower);
+    }
+}
+
 /****************************************************************************/
 /***        Local Functions                                               ***/
 /****************************************************************************/
+
+PRIVATE bool_t bAPP_AHIIsValidTxPower(uint8 u8TxPower)
+{
+    return (u8TxPower <= 0x0A ||
+            (u8TxPower >= 0x20 && u8TxPower <= 0x3F));
+}
+
+PRIVATE uint8 u8APP_AHITxPowerRecordCheck(const tsAPP_TxPowerRecord *psRecord)
+{
+    const uint8 au8Data[] = {
+        psRecord->u8Magic0,
+        psRecord->u8Magic1,
+        psRecord->u8Version,
+        psRecord->u8TxPower
+    };
+    uint8 u8Check = APP_TX_POWER_RECORD_CRC_SEED;
+    uint8 u8Byte;
+    uint8 u8Bit;
+
+    for (u8Byte = 0; u8Byte < (uint8)sizeof(au8Data); u8Byte++)
+    {
+        u8Check ^= au8Data[u8Byte];
+        for (u8Bit = 0; u8Bit < 8; u8Bit++)
+        {
+            u8Check = (uint8)((u8Check & 0x80U) ?
+                      ((u8Check << 1) ^ APP_TX_POWER_RECORD_CRC_POLY) :
+                      (u8Check << 1));
+        }
+    }
+
+    return u8Check;
+}
+
+PRIVATE bool_t bAPP_AHILoadStoredTxPower(uint8 *pu8TxPower)
+{
+    tsAPP_TxPowerRecord sRecord;
+    uint16 u16BytesRead = 0;
+
+    if (!bAPP_AHIStoredTxPowerLoaded)
+    {
+        bAPP_AHIStoredTxPowerLoaded = TRUE;
+        bAPP_AHIStoredTxPowerValid =
+            (PDM_eReadDataFromRecord(PDM_ID_APP_TX_POWER,
+                                     &sRecord,
+                                     sizeof(sRecord),
+                                     &u16BytesRead) == PDM_E_STATUS_OK &&
+             u16BytesRead == sizeof(sRecord) &&
+             sRecord.u8Magic0 == APP_TX_POWER_RECORD_MAGIC_0 &&
+             sRecord.u8Magic1 == APP_TX_POWER_RECORD_MAGIC_1 &&
+             sRecord.u8Version == APP_TX_POWER_RECORD_VERSION &&
+             sRecord.u8Check == u8APP_AHITxPowerRecordCheck(&sRecord) &&
+             bAPP_AHIIsValidTxPower(sRecord.u8TxPower));
+
+        if (bAPP_AHIStoredTxPowerValid)
+        {
+            u8APP_AHIStoredTxPower = sRecord.u8TxPower;
+        }
+    }
+
+    if (bAPP_AHIStoredTxPowerValid)
+    {
+        *pu8TxPower = u8APP_AHIStoredTxPower;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+PRIVATE bool_t bAPP_AHISaveTxPower(uint8 u8TxPower)
+{
+    tsAPP_TxPowerRecord sRecord;
+    uint8 u8StoredTxPower;
+
+    if (bAPP_AHILoadStoredTxPower(&u8StoredTxPower) &&
+        u8StoredTxPower == u8TxPower)
+    {
+        return TRUE;
+    }
+
+    sRecord.u8Magic0 = APP_TX_POWER_RECORD_MAGIC_0;
+    sRecord.u8Magic1 = APP_TX_POWER_RECORD_MAGIC_1;
+    sRecord.u8Version = APP_TX_POWER_RECORD_VERSION;
+    sRecord.u8TxPower = u8TxPower;
+    sRecord.u8Check = u8APP_AHITxPowerRecordCheck(&sRecord);
+
+    if (PDM_eSaveRecordData(PDM_ID_APP_TX_POWER,
+                            &sRecord,
+                            sizeof(sRecord)) == PDM_E_STATUS_OK)
+    {
+        bAPP_AHIStoredTxPowerValid = TRUE;
+        u8APP_AHIStoredTxPower = u8TxPower;
+        return TRUE;
+    }
+
+    return FALSE;
+}
 
 /****************************************************************************
  *
@@ -240,6 +397,8 @@ PRIVATE void vAPP_DIOSetReadInput(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer
 PRIVATE void vAPP_AHISetTxPower(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, eAHI_Status *peAHIStatus)
 {
     uint8 u8TxPower;
+    uint32 u32OldTxPower;
+    uint32 u32ReadBack;
     uint32 u32BytesRead = 0;
     *peAHIStatus = E_AHI_PARSE_ERROR;
 
@@ -272,11 +431,34 @@ PRIVATE void vAPP_AHISetTxPower(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, 
          * dispatch still emits the stock E_SL_MSG_STATUS frame and omits the
          * value frame, so the failed-set wire shape is unchanged (status only).
          */
-        if (u8TxPower <= 0x0A || (u8TxPower >= 0x20 && u8TxPower <= 0x3F))
+        if (bAPP_AHIIsValidTxPower(u8TxPower))
         {
-            if (eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) == PHY_ENUM_SUCCESS)
-            {
-                *peAHIStatus = E_AHI_SUCCESS;
+             /*
+              * A readable rollback value is mandatory. Without it a later PDM
+              * failure could report failure while leaving the radio changed.
+              */
+             if (eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32OldTxPower) ==
+                     PHY_ENUM_SUCCESS &&
+                 eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u8TxPower) ==
+                     PHY_ENUM_SUCCESS)
+             {
+                /*
+                 * Do not persist a value unless the radio accepted it without
+                 * clamping. A successful command means both runtime and PDM
+                 * state were updated; otherwise restore the previous PIB when
+                 * it was available and keep the stock failure wire shape.
+                 */
+                if (eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32ReadBack) ==
+                        PHY_ENUM_SUCCESS &&
+                    (uint8)(u32ReadBack & PHY_PIB_TX_POWER_MASK) == u8TxPower &&
+                    bAPP_AHISaveTxPower(u8TxPower))
+                {
+                    *peAHIStatus = E_AHI_SUCCESS;
+                }
+                else
+                {
+                    (void)eAppApiPlmeSet(PHY_PIB_ATTR_TX_POWER, u32OldTxPower);
+                }
             }
         }
     }

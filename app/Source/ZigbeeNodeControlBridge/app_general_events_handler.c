@@ -61,6 +61,9 @@
 #include "zps_apl_zdo.h"
 #include "zps_apl_af.h"
 #include "app_Znc_cmds.h"
+#ifdef APP_AHI_CONTROL
+#include "app_ahi_commands.h"
+#endif
 #include "SerialLink.h"
 #include "pwrm.h"
 #include "uart.h"
@@ -1020,6 +1023,14 @@ PUBLIC void APP_vHandleStackEvents ( ZPS_tsAfEvent*    psStackEvent )
              bool_t    bSend =  TRUE;
              if(psStackEvent->eType == ZPS_EVENT_NWK_STARTED)
              {
+#ifdef APP_AHI_CONTROL
+                 /*
+                  * bdb_taskBDB() runs its init/formation state machines before
+                  * forwarding this ZPS event here. The MLME start/reset has
+                  * therefore completed for restored and newly formed networks.
+                  */
+                 APP_vAHIApplyPersistedTxPower();
+#endif
                  u8FormJoin = 1; /* formed */
              }
              if( psStackEvent->eType == ZPS_EVENT_NWK_FAILED_TO_START )

@@ -3,10 +3,10 @@
  * MODULE:  custom_diag.c
  *
  * DESCRIPTION:
- *   Implementation of the compact versioned read-only UART diagnostic
- *   extension declared in custom_diag.h. See that header for the safety
- *   envelope. Nothing here mutates persistent network identity, exposes key
- *   material, or performs raw PDM / credential-flash access.
+ *   Implementation of the compact versioned UART diagnostic and bounded
+ *   local-control extension declared in custom_diag.h. See that header for
+ *   the safety envelope. Nothing here mutates persistent network identity,
+ *   exposes key material, or performs raw PDM / credential-flash access.
  *
  *   Synchronisation note: the local neighbour and route tables are read using
  *   the same lock-free, copy-then-serialise strategy already used by the stock
@@ -38,8 +38,10 @@
 #include "zps_apl_af.h"
 #include "zps_nwk_nib.h"
 #include "zps_nwk_sec.h"
+#include "zps_gen.h"
 #include "mac_sap.h"
 #include "bdb_api.h"
+#include "rnd_pub.h"
 #include "custom_diag.h"
 /* APDU-pool usage helpers (u8GetApduUse). Minimal, dependency-free header;
  * implicit declaration of these is forbidden in this file, which is compiled
@@ -66,6 +68,33 @@ extern tsZllState  sZllState;   /* Application device/node state              */
 /****************************************************************************/
 
 PRIVATE uint8 s_au8DiagTx[DIAG_TX_BUFFER_SIZE];
+
+#ifdef OCB_TYPED_SUPPORT
+/* One small bounded export snapshot prevents CORE from observing a mixture of
+ * live states. No key bytes are ever copied into this object. */
+typedef struct
+{
+    uint64 u64CoordinatorIeee;
+    uint64 u64ExtPanId;
+    uint64 u64TrustCenterIeee;
+    uint32 u32TransactionId;
+    uint32 u32SessionId;
+    uint32 u32FieldBitmap;
+    uint32 u32ChannelMask;
+    uint32 u32NwkOutgoingCounter;
+    uint32 u32Digest;
+    uint16 u16PanId;
+    uint8  u8Channel;
+    uint8  u8UpdateId;
+    uint8  u8SecurityLevel;
+    uint8  u8NwkKeySequence;
+    uint8  u8ApsFlags;
+    uint8  u8ApsKeyType;
+    uint8  u8Active;
+} tsOcbExportSnapshot;
+
+PRIVATE tsOcbExportSnapshot s_sOcbExport;
+#endif
 
 /****************************************************************************/
 /***        Local helpers                                                 ***/
@@ -242,7 +271,288 @@ PUBLIC void CUSTOMDIAG_vHandleCapability(uint16 u16Len, const uint8 *pu8Rx)
 /***        General read-only diagnostics (0x0D1F / 0x8D1F)               ***/
 /****************************************************************************/
 
+PRIVATE void vDiagGeneralDiagResponse(void);
+
 PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
+{
+    if (u16Len != 0)
+    {
+        vDiagSendStatus(E_SL_MSG_GENERAL_DIAG_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+
+    vDiagGeneralDiagResponse();
+}
+
+#ifdef OCB_TYPED_SUPPORT
+    /****************************************************************************/
+    /***        Typed OCB metadata export (0x0D18..0x0D1C)                    ***/
+    /****************************************************************************/
+
+    /* v2395/generated-config pins for the only internal layouts used here.  These
+     * are typed live handles, never raw PDM layouts. */
+    DIAG_STATIC_ASSERT(ZPS_MAX_CHANNEL_LIST_SIZE == 1U, ocb_one_channel_mask);
+#ifndef ZPS_COORDINATOR
+#error "OCB typed export is valid only for the generated coordinator configuration"
+#endif
+    DIAG_STATIC_ASSERT(sizeof(((ZPS_tsNwkSecMaterialSet *)0)->au8Key) == 16U,
+                       ocb_v2395_nwk_key_width);
+
+    PRIVATE uint32 u32OcbFnv1a(const uint8 *pu8Data, uint8 u8Length)
+    {
+        uint32 u32Hash = 2166136261UL;
+        uint8 i;
+        for (i = 0; i < u8Length; i++)
+        {
+            u32Hash ^= pu8Data[i];
+            u32Hash *= 16777619UL;
+        }
+        return u32Hash;
+    }
+
+    PRIVATE bool_t bOcbCommonRequest(uint16 u16Len, const uint8 *pu8Rx,
+                                     uint16 u16Expected, uint32 *pu32Transaction,
+                                     uint32 *pu32Session)
+    {
+        if (u16Len != u16Expected)
+        {
+            return FALSE;
+        }
+        *pu32Transaction = ZNC_RTN_U32(pu8Rx, 2);
+        *pu32Session = (u16Expected >= OCB_COMMON_REQ_LEN) ?
+                       ZNC_RTN_U32(pu8Rx, 6) : 0U;
+        return TRUE;
+    }
+
+    PRIVATE uint8 u8OcbRequestStatus(const uint8 *pu8Rx, uint32 u32Transaction,
+                                     uint32 u32Session)
+    {
+        if (pu8Rx[0] != OCB_ABI_VERSION || pu8Rx[1] != OCB_SCHEMA_VERSION)
+        {
+            return OCB_STATUS_BAD_VERSION;
+        }
+        if (!s_sOcbExport.u8Active)
+        {
+            return OCB_STATUS_NO_SESSION;
+        }
+        if (s_sOcbExport.u32TransactionId != u32Transaction ||
+            s_sOcbExport.u32SessionId != u32Session)
+        {
+            return OCB_STATUS_SESSION_MISMATCH;
+        }
+        return OCB_STATUS_OK;
+    }
+
+    PRIVATE uint8 u8OcbWritePrefix(uint32 u32Transaction, uint32 u32Session,
+                                   uint8 u8Status)
+    {
+        uint8 u8Length = 0;
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], OCB_ABI_VERSION,    u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], OCB_SCHEMA_VERSION, u8Length);
+        ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], u32Transaction,     u8Length);
+        ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], u32Session,         u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], u8Status,           u8Length);
+        return u8Length; /* 11 */
+    }
+
+    PRIVATE uint8 u8OcbSerialiseCore(uint8 u8Length)
+    {
+        ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u32FieldBitmap,       u8Length);
+        ZNC_BUF_U64_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u64CoordinatorIeee,   u8Length);
+        ZNC_BUF_U16_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u16PanId,             u8Length);
+        ZNC_BUF_U64_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u64ExtPanId,          u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_sOcbExport.u8Channel,            u8Length);
+        ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u32ChannelMask,       u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_sOcbExport.u8UpdateId,           u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_sOcbExport.u8SecurityLevel,      u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_sOcbExport.u8NwkKeySequence,     u8Length);
+        ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u32NwkOutgoingCounter,u8Length);
+        ZNC_BUF_U64_UPD (&s_au8DiagTx[u8Length], s_sOcbExport.u64TrustCenterIeee,   u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_sOcbExport.u8ApsFlags,           u8Length);
+        ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_sOcbExport.u8ApsKeyType,         u8Length);
+        return u8Length;
+    }
+
+    PUBLIC void CUSTOMDIAG_vHandleOcbExportBegin(uint16 u16Len, const uint8 *pu8Rx)
+    {
+        uint32 u32Transaction, u32Ignored;
+        uint8 u8Length, u8Status = OCB_STATUS_OK;
+        ZPS_tsNwkNib *psNib;
+        ZPS_tsAplAib *psAib;
+        uint8 u8MaskCount = 0;
+        uint32 *pu32Masks;
+        uint32 u32Channel = 0;
+
+        if (!bOcbCommonRequest(u16Len, pu8Rx, OCB_BEGIN_REQ_LEN,
+                               &u32Transaction, &u32Ignored))
+        {
+            vDiagSendStatus(E_SL_MSG_OCB_EXPORT_BEGIN_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+        if (pu8Rx[0] != OCB_ABI_VERSION || pu8Rx[1] != OCB_SCHEMA_VERSION)
+        {
+            u8Status = OCB_STATUS_BAD_VERSION;
+        }
+        vDiagSendStatus(E_SL_MSG_OCB_EXPORT_BEGIN_REQ, E_SL_MSG_STATUS_SUCCESS);
+        if (u8Status == OCB_STATUS_OK)
+        {
+            memset(&s_sOcbExport, 0, sizeof(s_sOcbExport));
+            psNib = ZPS_psNwkNibGetHandle(ZPS_pvAplZdoGetNwkHandle());
+            psAib = ZPS_psAplAibGetAib();
+            pu32Masks = ZPS_pu32AplAibGetApsChannelMask(&u8MaskCount);
+
+            s_sOcbExport.u32TransactionId = u32Transaction;
+            s_sOcbExport.u32SessionId = RND_u32GetRand(1, 0xFFFFFFFFUL);
+            if (s_sOcbExport.u32SessionId == 0U) { s_sOcbExport.u32SessionId = 1U; }
+            s_sOcbExport.u64CoordinatorIeee = ZPS_u64AplZdoGetIeeeAddr();
+            s_sOcbExport.u16PanId = psNib->sPersist.u16VsPanId;
+            s_sOcbExport.u64ExtPanId = psNib->sPersist.u64ExtPanId;
+            s_sOcbExport.u8UpdateId = psNib->sPersist.u8UpdateId;
+            s_sOcbExport.u8SecurityLevel = psNib->u8SecurityLevel;
+            s_sOcbExport.u8NwkKeySequence = psNib->sPersist.u8ActiveKeySeqNumber;
+            s_sOcbExport.u32NwkOutgoingCounter = psNib->sTbl.u32OutFC;
+            s_sOcbExport.u64TrustCenterIeee = psAib->u64ApsTrustCenterAddress;
+            s_sOcbExport.u8ApsFlags =
+                (psAib->bApsDesignatedCoordinator ? 1U : 0U) |
+                (psAib->bApsUseInsecureJoin ? 2U : 0U) |
+                (psAib->bDecryptInstallCode ? 4U : 0U);
+            s_sOcbExport.u8ApsKeyType = psAib->u8KeyType;
+            if (eAppApiPlmeGet(PHY_PIB_ATTR_CURRENT_CHANNEL, &u32Channel) ==
+                PHY_ENUM_SUCCESS)
+            {
+                s_sOcbExport.u8Channel = (uint8)u32Channel;
+                s_sOcbExport.u32FieldBitmap |= OCB_FIELD_CHANNEL;
+            }
+            if (pu32Masks != NULL && u8MaskCount == ZPS_MAX_CHANNEL_LIST_SIZE)
+            {
+                s_sOcbExport.u32ChannelMask = pu32Masks[0];
+                s_sOcbExport.u32FieldBitmap |= OCB_FIELD_CHANNEL_MASK;
+            }
+            s_sOcbExport.u32FieldBitmap |=
+                OCB_FIELD_COORD_IEEE | OCB_FIELD_PAN_ID | OCB_FIELD_EXT_PAN_ID |
+                OCB_FIELD_NWK_UPDATE_ID | OCB_FIELD_SECURITY_LEVEL |
+                OCB_FIELD_NWK_KEY_SEQUENCE | OCB_FIELD_NWK_OUT_COUNTER |
+                OCB_FIELD_APS_TC_ADDRESS | OCB_FIELD_APS_STATE;
+            s_sOcbExport.u8Active = 1U;
+
+            /* Digest is FNV-1a over the exact 44-byte canonical CORE body,
+             * beginning at field_bitmap and excluding the correlated prefix. */
+            u8Length = u8OcbSerialiseCore(0U);
+            s_sOcbExport.u32Digest = u32OcbFnv1a(s_au8DiagTx, u8Length);
+        }
+
+        u8Length = u8OcbWritePrefix(u32Transaction,
+                                    (u8Status == OCB_STATUS_OK) ?
+                                        s_sOcbExport.u32SessionId : 0U,
+                                    u8Status);
+        ZNC_BUF_U32_UPD(&s_au8DiagTx[u8Length], OCB_CAP_BITMAP, u8Length);
+        ZNC_BUF_U32_UPD(&s_au8DiagTx[u8Length],
+                        (u8Status == OCB_STATUS_OK) ?
+                            s_sOcbExport.u32FieldBitmap : 0U, u8Length);
+        vSL_WriteMessage(E_SL_MSG_OCB_EXPORT_BEGIN_RSP, u8Length, s_au8DiagTx, 0);
+    }
+
+    PUBLIC void CUSTOMDIAG_vHandleOcbExportCore(uint16 u16Len, const uint8 *pu8Rx)
+    {
+        uint32 u32Transaction, u32Session;
+        uint8 u8Length, u8Status;
+        if (!bOcbCommonRequest(u16Len, pu8Rx, OCB_COMMON_REQ_LEN,
+                               &u32Transaction, &u32Session))
+        {
+            vDiagSendStatus(E_SL_MSG_OCB_EXPORT_CORE_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+        u8Status = u8OcbRequestStatus(pu8Rx, u32Transaction, u32Session);
+        vDiagSendStatus(E_SL_MSG_OCB_EXPORT_CORE_REQ, E_SL_MSG_STATUS_SUCCESS);
+        u8Length = u8OcbWritePrefix(u32Transaction, u32Session, u8Status);
+        if (u8Status == OCB_STATUS_OK)
+        {
+            u8Length = u8OcbSerialiseCore(u8Length);
+        }
+        else
+        {
+            memset(&s_au8DiagTx[u8Length], 0, OCB_CORE_RSP_LEN - u8Length);
+            u8Length = OCB_CORE_RSP_LEN;
+        }
+        vSL_WriteMessage(E_SL_MSG_OCB_EXPORT_CORE_RSP, u8Length, s_au8DiagTx, 0);
+    }
+
+    PUBLIC void CUSTOMDIAG_vHandleOcbExportLinkKey(uint16 u16Len, const uint8 *pu8Rx)
+    {
+        uint32 u32Transaction, u32Session;
+        uint64 u64RequestedEui = 0U;
+        uint8 u8Length, u8Status;
+        if (!bOcbCommonRequest(u16Len, pu8Rx, OCB_LINK_REQ_LEN,
+                               &u32Transaction, &u32Session))
+        {
+            vDiagSendStatus(E_SL_MSG_OCB_EXPORT_LINK_KEY_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+        u64RequestedEui = ZNC_RTN_U64(pu8Rx, 10);
+        u8Status = u8OcbRequestStatus(pu8Rx, u32Transaction, u32Session);
+        if (u8Status == OCB_STATUS_OK) { u8Status = OCB_STATUS_FIELD_UNAVAILABLE; }
+        vDiagSendStatus(E_SL_MSG_OCB_EXPORT_LINK_KEY_REQ, E_SL_MSG_STATUS_SUCCESS);
+        u8Length = u8OcbWritePrefix(u32Transaction, u32Session, u8Status);
+        ZNC_BUF_U32_UPD(&s_au8DiagTx[u8Length], OCB_FIELD_LINK_KEYS, u8Length);
+        ZNC_BUF_U64_UPD(&s_au8DiagTx[u8Length], u64RequestedEui, u8Length);
+        ZNC_BUF_U8_UPD(&s_au8DiagTx[u8Length], 0U, u8Length); /* no key bytes */
+        vSL_WriteMessage(E_SL_MSG_OCB_EXPORT_LINK_KEY_RSP, u8Length, s_au8DiagTx, 0);
+    }
+
+    PUBLIC void CUSTOMDIAG_vHandleOcbExportEnd(uint16 u16Len, const uint8 *pu8Rx)
+    {
+        uint32 u32Transaction, u32Session, u32Digest = 0U;
+        uint8 u8Length, u8Status;
+        if (!bOcbCommonRequest(u16Len, pu8Rx, OCB_COMMON_REQ_LEN,
+                               &u32Transaction, &u32Session))
+        {
+            vDiagSendStatus(E_SL_MSG_OCB_EXPORT_END_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+        u8Status = u8OcbRequestStatus(pu8Rx, u32Transaction, u32Session);
+        if (u8Status == OCB_STATUS_OK) { u32Digest = s_sOcbExport.u32Digest; }
+        vDiagSendStatus(E_SL_MSG_OCB_EXPORT_END_REQ, E_SL_MSG_STATUS_SUCCESS);
+        u8Length = u8OcbWritePrefix(u32Transaction, u32Session, u8Status);
+        ZNC_BUF_U8_UPD(&s_au8DiagTx[u8Length],
+                       (u8Status == OCB_STATUS_OK) ? 1U : 0U, u8Length);
+        ZNC_BUF_U32_UPD(&s_au8DiagTx[u8Length], u32Digest, u8Length);
+        vSL_WriteMessage(E_SL_MSG_OCB_EXPORT_END_RSP, u8Length, s_au8DiagTx, 0);
+        if (u8Status == OCB_STATUS_OK)
+        {
+            memset(&s_sOcbExport, 0, sizeof(s_sOcbExport));
+        }
+    }
+
+    PUBLIC void CUSTOMDIAG_vHandleOcbStatus(uint16 u16Len, const uint8 *pu8Rx)
+    {
+        uint32 u32Transaction, u32Session;
+        uint8 u8Length, u8Status;
+        if (!bOcbCommonRequest(u16Len, pu8Rx, OCB_COMMON_REQ_LEN,
+                               &u32Transaction, &u32Session))
+        {
+            vDiagSendStatus(E_SL_MSG_OCB_STATUS_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+            return;
+        }
+        u8Status = u8OcbRequestStatus(pu8Rx, u32Transaction, u32Session);
+        vDiagSendStatus(E_SL_MSG_OCB_STATUS_REQ, E_SL_MSG_STATUS_SUCCESS);
+        u8Length = u8OcbWritePrefix(u32Transaction, u32Session, u8Status);
+        ZNC_BUF_U8_UPD(&s_au8DiagTx[u8Length], s_sOcbExport.u8Active, u8Length);
+        ZNC_BUF_U32_UPD(&s_au8DiagTx[u8Length],
+                        (u8Status == OCB_STATUS_OK) ?
+                            s_sOcbExport.u32FieldBitmap : 0U, u8Length);
+        ZNC_BUF_U32_UPD(&s_au8DiagTx[u8Length],
+                        (u8Status == OCB_STATUS_OK) ?
+                            s_sOcbExport.u32Digest : 0U, u8Length);
+        vSL_WriteMessage(E_SL_MSG_OCB_STATUS_RSP, u8Length, s_au8DiagTx, 0);
+    }
+#endif /* OCB_TYPED_SUPPORT */
+
+PRIVATE void vDiagGeneralDiagResponse(void)
 {
     uint8         u8Length = 0;
     void         *pvNwk;
@@ -255,12 +565,6 @@ PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len)
     uint8         u8TxSixBit;
     uint8         u8DiagFlags = 0;
     uint8         u8TclkCb, u8TclkAddRepl, u8TclkCred;
-
-    if (u16Len != 0)
-    {
-        vDiagSendStatus(E_SL_MSG_GENERAL_DIAG_REQ, E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
-        return;
-    }
 
     vDiagSendStatus(E_SL_MSG_GENERAL_DIAG_REQ, E_SL_MSG_STATUS_SUCCESS);
 

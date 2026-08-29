@@ -68,6 +68,7 @@ extern "C" {
 #define PDM_ID_APP_GROUP_TABLE      0x3
 
 #define PDM_ID_APP_VERSION                  0x10
+#define PDM_ID_APP_TX_POWER                 0x11
 
 #define PDM_ID_INTERNAL_AIB                 0xf000
 #define PDM_ID_INTERNAL_BINDS               0xf001

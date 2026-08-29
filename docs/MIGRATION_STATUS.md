@@ -4,14 +4,140 @@ Target build cell (the requested configuration):
 
 ```
 JN5169 / JN516x / COORDINATOR / BAUD=115200
-GP_SUPPORT=1  LEGACY=1  R23_UPDATES=0  WWAH=0  OTA=0  TRACE=0  DEBUG=NONE  DISABLE_LTO=1
+GP_SUPPORT=1  LEGACY=1  R23_UPDATES=0  WWAH=0  OTA=0  TRACE=0
+DEBUG=NONE  DISABLE_LTO=1  APP_AHI_CONTROL=1
+INSECURE_DEV_RAW_PDM=0  OCB_TYPED_SUPPORT=1
+OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=0
 ```
 
 Build entry point: `scripts/build.sh {clean|all}` (see header for overrides).
 
-## Current milestone — reproducible linking image achieved
+**Publication-candidate status:** static/source invariants pass, and the
+current tree has completed a clean wrapper-default build with the pinned BA2
+toolchain. The current artifact measurements are recorded below. They are
+build evidence only: no image was flashed or hardware-qualified. Older hashes
+and map figures are explicitly labelled historical pre-TX-persistence evidence
+and must not be advertised as builds of the current source.
 
-The requested image **compiles and links**:
+The current wrapper-default constants are diagnostic protocol 1.2, build
+revision 9, capability bitmap `0x000000000000C60F`, and
+`DIAG_FW_BUILD_ID=0x0101C525`. The default-off experimental key-export build
+adds bit 16, producing bitmap `0x000000000001C60F` and build ID
+`0x0100C525`. Reserved BackupCapable bit 17 remains clear in every build.
+
+Current added/changed UART surfaces are:
+
+- custom diagnostics/control `0x0D0F/0x8D0F`,
+  `0x0D12/0x8D12`…`0x0D1C/0x8D1C`, and `0x0D1F/0x8D1F`;
+- removed/reserved TCLK request `0x0D00`, which emits only outer `0x8000`
+  UNHANDLED_COMMAND and never `0x8D00`;
+- default-off experimental `0x0D20/0x8D20`…`0x0D2A/0x8D2A`, with
+  `0x0D24`…`0x0D28` implemented only as restore-unavailable stubs;
+- legacy TX power `0x0806/0x8806` and `0x0807/0x8807`, retaining their
+  two-byte value responses while adding exact-code validation and SET
+  persistence;
+- unsafe legacy raw-PDM `0x0B00/0x8B00`, `0x0B01/0x8B01`, and `0x0B02`,
+  now absent from default dispatch and available only in the incompatible
+  bench-only raw-PDM build.
+
+Exact payload lengths and OCB status/capability domains are enumerated in
+`README.md` and `docs/OCB_UART_ABI.md`.
+
+Current clean pinned-BA2 wrapper-default build:
+
+```
+text=255592  data=2104  bss=30421
+_minimum_heap_end=0x0400679c
+_stack_low_water_mark=0x04006890
+linker RAM margin=244 bytes
+bin sha256 f17777bec16acd8f1586e56d5a3695f12c381603f634fee15f26859d7d1be6e0
+elf sha256 23d25e6b6968f2bcfa56393770e6184e9904d6ea6557e73484f8ae826ed378e1
+```
+
+An initial build and a subsequent clean regeneration produced the same
+hashes. This confirms the local build result, not cross-host reproducibility,
+flash approval, PDM capacity under wear, or hardware behavior.
+
+## OCB firmware hardening and typed export status
+
+The unauthenticated arbitrary-PDM UART handlers `0x0B00/0x0B01/0x0B02` are no
+longer compiled or dispatched in production. They exist only behind the
+default-off `INSECURE_DEV_RAW_PDM=1` bench switch; production
+`OCB_TYPED_SUPPORT=1` and that switch are a Makefile error. `scripts/check.sh`
+proves the defaults, dispatch guards, and rejected build-variable combination.
+
+An additive ABI/schema 1 typed snapshot export is implemented at
+`0x0D18`..`0x0D1C`. It exports coordinator/network identifiers, channel/mask,
+update ID, security level, network-key sequence, the live authoritative NWK
+outgoing frame counter, and limited APS/TC metadata. It exports no keys and
+implements no restore; link keys, network key, APS per-peer counters, physical
+unlock, and restore are explicitly unavailable and their capability bits are
+clear. It therefore does **not** claim full OCB BackupCapable support. See
+`docs/OCB_UART_ABI.md`.
+
+In the historical pre-TX build, the metadata snapshot increased link-time BSS
+by 72 bytes and shared the existing 201-byte diagnostic TX buffer. That pinned
+BA2 link reported `bss=30421`,
+`_minimum_heap_end=0x0400679c`, stack 6000, and a post-change linker margin of
+**244 bytes**:
+`32692 - ((0x0400679c - 0x0400004c) + 6000)`.
+
+Historical pinned BA2 result for the unqualified, pre-TX-persistence OCB
+metadata-export candidate:
+
+```
+text=255136  data=2104  bss=30421
+bin sha256 cf1cb12d49a7721779b1f46ec18ff75cc09f9b9b9503d6509edf19fa7d5dbee4
+elf sha256 fb2aa7369847e04ac03881e81b9d8ac76b108a1fae905a5b5ed51d72a4b6d6e9
+DIAG_FW_BUILD_ID=0x0101c525  capability bitmap=0x000000000000c60f
+```
+
+Two builds, including a clean regeneration/relink, produced that same BIN
+hash. This records reproducibility of the historical source only; no image was
+flashed and no OCB UART exchange, reset behavior, counter correctness, or
+current TX-persistence integration was hardware-qualified.
+
+### Default-off experimental trusted-serial key export
+
+`OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1` adds a 30-second public nonce
+confirmation and typed export of the active network key/counter, default TC
+link key/counters, the one generated live APS key-table slot, and up to 70
+flash TCLK credentials by index. It does not claim authentication or
+confidentiality. Flash-TCLK counters cannot be read or restored through a
+supported v2395 API, so restore commands return a precise unsupported status,
+do not create PDM staging data, do not mutate active state, and do not reboot.
+Experimental capability bit 16 is advertised; reserved production
+BackupCapable bit 17 remains clear.
+
+Historical pre-TX-persistence experimental pinned-BA2 build:
+
+```
+text=258156  data=2104  bss=30533
+bin sha256 9afb98242e2573f3c14808736db457c0bae74039b104690701393aca1593422b
+_minimum_heap_end=0x0400680c  stack=6000  linker RAM margin=132 bytes
+```
+
+Other valid feature cells were also clean-built:
+
+```
+typed=0 experimental=0 raw_pdm=0:
+  text=252992 data=2104 bss=30349
+  bin=103f2f6384a4a7f89e748f4f9bff91aafab22f68226dc0d2458dfc6e90669bd1
+
+typed=0 experimental=0 raw_pdm=1 (explicit insecure development only):
+  text=253604 data=2104 bss=30349
+  bin=1879fcaf4ba89295a382bbbc522f6fb6510f16a4c3b46d95ad6713ac91c2f5b0
+```
+
+The current default production cell is no longer expected to be byte-identical
+to that prior metadata image because TX persistence adds code and three bytes
+of cache BSS. Invalid combinations (experimental without typed OCB, or any
+production/experimental OCB with raw PDM) are rejected by the Makefile and
+`scripts/check.sh`.
+
+## Historical pre-OCB baseline — reproducible linking image achieved
+
+The historical pre-OCB requested image **compiled and linked**:
 `ZigbeeNodeControlBridge_JN5169_GP_Proxy_COORDINATOR_115200.{elf,bin}`
 (JN5169 / COORDINATOR / 115200 / GP_SUPPORT=1 / LEGACY=1 / R23_UPDATES=0 /
 WWAH=0). Two clean builds are **byte-identical** (`.bin` and `.elf`):
@@ -469,14 +595,17 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 ## Diagnostic ABI — proto 1.2 / build rev 9
 
 - Protocol **1.2**, build **rev 9**; capability response `0x8D0F`;
-  deterministic build id `0x01014525` (rev8 was `0x01014524`, rev7
-  `0x0101452B`; only the build revision changed).
-- **rev9 is descriptor-only.** No wire structure, command encoding or
-  capability bit changed; the revision exists so a host can tell from the
-  build id whether the image can originate the restored endpoint-1 output
-  clusters through raw `0x0530` at all (see "Endpoint-1 raw-NCP transmit
-  allowlist" above). No ZCL runtime instance, RAM pool, table size or security
-  surface was touched.
+  wrapper-default deterministic build id `0x0101C525` and capability bitmap
+  `0x000000000000C60F`. The earlier rev9 build without typed OCB capability
+  bit 15 used build ID `0x01014525` (rev8 was `0x01014524`, rev7
+  `0x0101452B`). Enabling experimental bit 16 produces `0x0100C525`.
+- **The rev8→rev9 revision change itself was descriptor-only.** No existing
+  command encoding changed: the revision identified restoration of endpoint
+  1's raw-`0x0530` output-cluster allowlist. The current unpublished candidate
+  also adds capability-gated OCB opcodes and TX persistence. Typed OCB changes
+  the deterministic build ID through capability bit 15; TX persistence changes
+  behavior but not command layout, diagnostic protocol version, or capability
+  bits.
 - **Green Power commissioning** is capability bit `1 << 3`. Since rev7 it is
   backed by a real negotiated command, `0x0D17`/`0x8D17`, and the bit and the
   handler share one compile switch (`DIAG_HAVE_GP_COMMISSIONING`, derived from
@@ -548,6 +677,45 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
   - Wire shapes are byte-length-stable; only the byte *values*/validation
     changed, hence the proto-minor + build-rev bump (host validator must move
     to 1.2 / rev 4).
+  - The coordinator now stores a successfully round-tripped `0x0806` value in
+    the dedicated application record `PDM_ID_APP_TX_POWER` (`0x0011`). The
+    five-byte record carries `TX` magic, format version 1, the native code, and
+    a CRC-8 check byte. `ZPS_eAplAfInit()` is not the restore anchor: a later
+    stack start can issue an MLME reset and restore PIB defaults. For a restored
+    coordinator the order is `BDB_vStart()` →
+    `BDB_vNfFormCentralizedNwk()` → `ZPS_eAplZdoStartStack()` →
+    `ZPS_EVENT_NWK_STARTED`; for a factory-new coordinator the host formation
+    command enters `BDB_eNfStartNwkFormation()` and reaches the same event.
+    `bdb_taskBDB()` runs its init/formation state machines before forwarding
+    that ZPS event through `BDB_EVENT_ZPSAF` to `APP_vHandleStackEvents()`.
+    The application therefore applies the setting at every forwarded
+    `ZPS_EVENT_NWK_STARTED`, after the corresponding start/reset MLME work.
+    This is intentional: any later in-process
+    `BDB_eNfStartNwkFormation()` accepted after BDB's on-network state has
+    cleared invokes `BDB_vNfFormCentralizedNwk()` and
+    `ZPS_eAplZdoStartStack()` again; its later `ZPS_EVENT_NWK_STARTED` may
+    follow another default-PIB reset.
+    Suppressing that event for the remainder of the boot would lose the
+    persisted setting after re-formation. The validated record remains cached,
+    so repeated network starts reapply the PIB but never reread or write PDM.
+  - Wrong-size, wrong-magic, old-version, CRC-failing, and out-of-set records
+    are invalid and cannot satisfy the equal-value write-elision test; the next
+    successful SET replaces them. If an intact current record already stores
+    the requested canonical code, the SET still performs and verifies the
+    radio operation but skips `PDM_eSaveRecordData()`. A readable old PIB is
+    required before any SET mutation. A SET is reported successful only after
+    exact radio round-trip and either a matching valid record or a successful
+    PDM save; every post-mutation failure rolls back to the readable old PIB.
+    This changes neither `0x0806`/`0x0807` encoding nor accepted values. These
+    are **native signed six-bit MiniMac codes**, not calibrated dBm
+    measurements.
+  - The build uses EEPROM PDM and calls `PDM_eInitialise(63)`. The new payload
+    is only five bytes and does not enlarge existing network/security records,
+    but PDM record metadata, segment allocation, wear state, and field-device
+    occupancy are runtime concerns. No static source evidence proves that
+    every deployed 63-segment store has room for another record. Save failure
+    is fail-closed with PIB rollback; capacity and near-full/worn-store behavior
+    remain hardware qualification items.
 - **TCLK 0x0D00 diagnostic REMOVED** (security-sensitive). The feature exported
   the full internal TCLK/APS-security negotiation state over UART and
   interposed four ZPS crypto functions via `-Wl,--wrap`

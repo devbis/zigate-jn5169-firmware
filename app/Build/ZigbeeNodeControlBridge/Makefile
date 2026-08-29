@@ -104,6 +104,44 @@ NETWORK_RECOVERY       ?= 0
 STACK_MEASURE          ?= 0
 APP_AHI_CONTROL        ?= 1
 
+# SECURITY: the legacy 0x0B00/0x0B01/0x0B02 commands provide unauthenticated
+# arbitrary PDM read/write/activation and must never be present in a production
+# image.  They are retained solely for explicit bench development.  The name is
+# intentionally alarming and the default is off.
+INSECURE_DEV_RAW_PDM   ?= 0
+
+# Typed Open Coordinator Backup metadata-export subset. This production/default
+# switch does not implement restore or claim BackupCapable and is deliberately
+# incompatible with raw PDM access.
+OCB_TYPED_SUPPORT      ?= 1
+
+# EXPERIMENTAL trusted-local-serial key export. This is intentionally off until
+# hardware qualification. The nonce handshake prevents accidental invocation;
+# it is NOT authentication and provides no confidentiality.
+OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL ?= 0
+
+ifeq ($(INSECURE_DEV_RAW_PDM),1)
+ifeq ($(OCB_TYPED_SUPPORT),1)
+$(error INSECURE_DEV_RAW_PDM cannot be enabled with production OCB_TYPED_SUPPORT)
+endif
+CFLAGS += -DINSECURE_DEV_RAW_PDM
+$(warning SECURITY WARNING: building unauthenticated development-only raw PDM UART commands)
+endif
+
+ifeq ($(OCB_TYPED_SUPPORT),1)
+CFLAGS += -DOCB_TYPED_SUPPORT
+endif
+
+ifeq ($(OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL),1)
+ifneq ($(OCB_TYPED_SUPPORT),1)
+$(error OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL requires OCB_TYPED_SUPPORT)
+endif
+ifeq ($(INSECURE_DEV_RAW_PDM),1)
+$(error experimental OCB cannot be combined with INSECURE_DEV_RAW_PDM)
+endif
+CFLAGS += -DOCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+endif
+
 ###############################################################################
 
 CFLAGS  += -DUART_BAUD_RATE=$(BAUD)
@@ -223,6 +261,9 @@ APPSRC += uart.c
 APPSRC += pdum_apdu.S
 APPSRC += app_ota_server.c
 APPSRC += custom_diag.c
+ifeq ($(OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL),1)
+APPSRC += ocb_experimental.c
+endif
 ifeq ($(JENNIC_CHIP_FAMILY),JN517x)
 APPSRC += AHI_ModuleConfiguration.c
 endif
@@ -333,6 +374,7 @@ WindowCovering.o: CFLAGS += -DCLD_WINDOW_COVERING
 # sources in this tree are not clean under this flag and are out of scope.
 DIAG_STRICT_OBJS = \
     custom_diag.o \
+    ocb_experimental.o \
     app_general_events_handler.o \
     app_zcl_event_handler.o \
     app_Znc_cmds.o \

@@ -107,9 +107,9 @@ typedef enum
     E_SL_MSG_GET_TCLK_DIAGNOSTIC                               =   0x0D00,
     E_SL_MSG_TCLK_DIAGNOSTIC_RESPONSE                          =   0x8D00,
 
-    /* Compact versioned read-only custom diagnostic extension.
-     * These IDs are locally unused in this source tree; hosts must negotiate
-     * protocol version/capabilities via 0x0D0F before relying on them. */
+    /* Compact versioned diagnostic and bounded local-control extension.
+     * Hosts must negotiate protocol version/capabilities via 0x0D0F before
+     * relying on these locally implemented command IDs. */
     E_SL_MSG_CAPABILITY_REQ                                    =   0x0D0F,
     E_SL_MSG_CAPABILITY_RSP                                    =   0x8D0F,
     E_SL_MSG_GROUP_OP_REQ                                      =   0x0D12,
