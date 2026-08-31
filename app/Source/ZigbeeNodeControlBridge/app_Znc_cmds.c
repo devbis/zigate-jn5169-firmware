@@ -642,34 +642,19 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                 OCBEXP_vHandleLinkKey(u16PacketLength, au8LinkRxBuffer);
                 return;
             case E_SL_MSG_OCBEXP_RESTORE_BEGIN_REQ:
-                OCBEXP_vHandleRestoreUnavailable(
-                    E_SL_MSG_OCBEXP_RESTORE_BEGIN_REQ,
-                    E_SL_MSG_OCBEXP_RESTORE_BEGIN_RSP,
-                    u16PacketLength, au8LinkRxBuffer);
+                OCBEXP_vHandleRestoreBegin(u16PacketLength, au8LinkRxBuffer);
                 return;
             case E_SL_MSG_OCBEXP_RESTORE_CORE_REQ:
-                OCBEXP_vHandleRestoreUnavailable(
-                    E_SL_MSG_OCBEXP_RESTORE_CORE_REQ,
-                    E_SL_MSG_OCBEXP_RESTORE_CORE_RSP,
-                    u16PacketLength, au8LinkRxBuffer);
+                OCBEXP_vHandleRestoreField(u16PacketLength, au8LinkRxBuffer);
                 return;
             case E_SL_MSG_OCBEXP_RESTORE_LINK_REQ:
-                OCBEXP_vHandleRestoreUnavailable(
-                    E_SL_MSG_OCBEXP_RESTORE_LINK_REQ,
-                    E_SL_MSG_OCBEXP_RESTORE_LINK_RSP,
-                    u16PacketLength, au8LinkRxBuffer);
+                OCBEXP_vHandleRestoreLink(u16PacketLength, au8LinkRxBuffer);
                 return;
             case E_SL_MSG_OCBEXP_VALIDATE_REQ:
-                OCBEXP_vHandleRestoreUnavailable(
-                    E_SL_MSG_OCBEXP_VALIDATE_REQ,
-                    E_SL_MSG_OCBEXP_VALIDATE_RSP,
-                    u16PacketLength, au8LinkRxBuffer);
+                OCBEXP_vHandleValidate(u16PacketLength, au8LinkRxBuffer);
                 return;
             case E_SL_MSG_OCBEXP_COMMIT_REQ:
-                OCBEXP_vHandleRestoreUnavailable(
-                    E_SL_MSG_OCBEXP_COMMIT_REQ,
-                    E_SL_MSG_OCBEXP_COMMIT_RSP,
-                    u16PacketLength, au8LinkRxBuffer);
+                OCBEXP_vHandleCommit(u16PacketLength, au8LinkRxBuffer);
                 return;
             case E_SL_MSG_OCBEXP_STATUS_REQ:
                 OCBEXP_vHandleStatus(u16PacketLength, au8LinkRxBuffer);

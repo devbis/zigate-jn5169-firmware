@@ -97,7 +97,63 @@
 #include "app_green_power.h"
 #endif
 
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+#include "ocb_experimental.h"
+#endif
+
 #include "pdm_flash.h"
+
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+/* Empirically-discovered boot settle delay, experimental build only.
+ *
+ * HIL evidence: on a cold boot with erased PDM, this larger (restore-enabled)
+ * binary silently hangs/crashes very early in vInitialiseApp() -- before the
+ * first UART output -- with no response even to a hardware GPIO reset. Bisected
+ * on real JN5169 hardware by inserting single blocking UART_vTxChar() debug
+ * writes at successive checkpoints: a write at the VERY TOP of vInitialiseApp(),
+ * before PDM_eInitialise(), was independently sufficient to make the exact same
+ * boot path (through PDM_eInitialise/PDUM_vInit/PWRM_vInit/ZPS_eAplAfInit and,
+ * on factory-new, ZPS_vNwkNibSetChannel/SetPanId) complete reliably; the same
+ * binary with zero added delay reproduced the hang on every attempt. The stock
+ * (non-experimental) image needs no such delay and is unmodified.
+ *
+ * Not fully confirmed with a debugger/logic analyzer, but disassembling
+ * libPDM_EEPROM_NO_RTOS_JN516x.a and libHardwareApi_JN5169.a
+ * (ba-elf-objdump -dr) narrowed the leading hypothesis to a specific
+ * mechanism: PDM_eInitialise(), when PDM is truly blank (as it always is on
+ * this exact HIL scenario), calls iPDM_CreateFileSystemInRAM() ->
+ * vPDM_GenerateCleanFileSystem(), which loops iAHI_EraseEEPROMsegment() over
+ * every flash segment. Each call runs bAHI_InitialiseEEPROM(), which writes
+ * an MMIO "enable" pattern (0x10100) to register 0x1000090 -- but ONLY on
+ * this boot's very first EEPROM operation (gated by a global counter,
+ * u8EEPROMinitialiseCount == 0); every later call in the same erase loop
+ * writes 0 there instead. The erase command that follows (via registers
+ * 0x1000080/0x1000084) is paced by a fixed 16-iteration dummy-write loop, not
+ * a hardware-ready poll. If that one-time enable races the EEPROM/flash
+ * controller's own post-reset settle time, and the fixed 16-cycle pad is
+ * insufficient to cover it, a command issued into the controller's internal
+ * reset window is a plausible way to wedge it -- consistent with a hang deep
+ * in a per-segment erase loop that only clears on a real hardware reset. This
+ * delay sits exactly where that theory says it needs to: before the very
+ * first PDM/EEPROM hardware access this boot performs. Treat this mechanism
+ * as evidence-backed but not proven, and this delay as a characterized
+ * empirical workaround rather than a datasheet-verified fix; revisit with
+ * proper debug tooling (or a logic analyzer on 0x1000080-0x1000094) before
+ * relying on this build further. */
+PRIVATE void vOCBExpBootSettleDelay(void)
+{
+    volatile uint32 u32Count = 200000UL; /* ~2-10ms at this core clock; large
+                                           * safety margin over the smallest
+                                           * delay (a single blocking UART
+                                           * byte write) shown sufficient on
+                                           * hardware. One-time cost, only
+                                           * paid at cold boot. */
+    while (u32Count != 0U)
+    {
+        u32Count--;
+    }
+}
+#endif
 
 /****************************************************************************/
 /***        Macro Definitions                                             ***/
@@ -169,7 +225,14 @@ uint8 u8GPZCLTimerEvent;
 #define BDB_QUEUE_SIZE                                             2
 #define APP_NUM_STD_TMRS                                           4
 
-#define APP_ZTIMER_STORAGE                                         (APP_NUM_STD_TMRS + APP_NUM_GP_TMRS)
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+    PUBLIC uint8 u8OcbUnlockTimer;
+    #define APP_NUM_OCB_TMRS        1
+#else
+    #define APP_NUM_OCB_TMRS        0
+#endif
+
+#define APP_ZTIMER_STORAGE                                         (APP_NUM_STD_TMRS + APP_NUM_GP_TMRS + APP_NUM_OCB_TMRS)
 
 #if JENNIC_CHIP_FAMILY == JN517x
 
@@ -542,6 +605,9 @@ PRIVATE void vInitialiseApp ( void )
     BDB_tsInitArgs    sArgs;
     uint8             u8DeviceType;
 
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+    vOCBExpBootSettleDelay();
+#endif
     PDM_eInitialise ( 63 );
     //APP_MigratePDM();
     PDUM_vInit ( );
@@ -601,6 +667,21 @@ PRIVATE void vInitialiseApp ( void )
         ZPS_vNwkNibSetPanId (ZPS_pvAplZdoGetNwkHandle(), (uint16) RND_u32GetRand ( 1, 0xfff0 ) );
 
     }
+
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+    /* HIL root-caused (disassembly of libZPSMAC_Mini_SOC_JN516x.a /
+     * libMiniMac_JN5169.a): ZPS_vSetOverrideLocalIeeeAddr() is not a deferred
+     * "read this pointer later" hook -- vAppApiSetMacAddrLocation() calls
+     * SOC_ZPS_vMacPibSetExtAddr() synchronously, which tail-chains through
+     * vMiniMac_MLME_SetReq_PanId() into vMMAC_SetRxAddress(), a hardware MAC
+     * register write/poll. Calling it before ZPS_eAplAfInit() (which brings up
+     * the radio) hit that hardware before it was clocked/initialised --
+     * reliably hanging boot. Moved to run after ZPS_eAplAfInit() in both
+     * branches above; see the comment on OCBEXP_vApplyAdoptedIeeeAtBoot() in
+     * ocb_experimental.c. */
+    OCBEXP_vApplyAdoptedIeeeAtBoot();
+#endif
+
     //Envoie message Start after PDM loaded
     uint8_t au8values[1];
     uint8_t u8Length=0;
@@ -753,6 +834,14 @@ PUBLIC void APP_vInitResources ( void )
 
 #ifdef CLD_GREENPOWER
     ZTIMER_eOpen(&u8GPTimerTick,       APP_cbTimerGPZclTick,        NULL, 					   ZTIMER_FLAG_PREVENT_SLEEP );
+#endif
+
+#ifdef OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL
+    /* Authoritative 30-second unlock deadline for the experimental OCB
+     * CHALLENGE/UNLOCK gate; see the comment on OCBEXP_UNLOCK_SECONDS in
+     * ocb_experimental.h for why this must be a ZTimer, not a raw AHI tick
+     * timer readout. */
+    ZTIMER_eOpen(&u8OcbUnlockTimer,    OCBEXP_vUnlockTimeout,       NULL,                      ZTIMER_FLAG_PREVENT_SLEEP );
 #endif
 
     /* Create all the queues */

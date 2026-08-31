@@ -12,9 +12,25 @@ restore, or claim BackupCapable. See
 
 A separate default-off
 `OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1` build adds trusted-local-UART network
-and link-key export with a 30-second nonce confirmation that is explicitly
-**not authentication**. Restore remains blocked and BackupCapable remains
-clear because v2395 does not expose flash-TCLK counters or atomic rollback.
+and link-key **export and a streamed, field-tagged restore** (`0x0D24`..`0x0D28`)
+with a 30-second nonce confirmation that is explicitly **not authentication**.
+Restore is bench-only and unqualified: BackupCapable (reserved bit 17) stays
+clear because the path is unauthenticated and non-atomic. HIL testing (real
+JN5169, 2026-08-31) verified network key, PAN/ext-PAN id, channel, TC link
+key, **the NWK outgoing frame counter, and coordinator-IEEE adoption** all
+restore correctly and survive the COMMIT reboot, including onto a target whose
+PDM had just been fully erased. Both the frame counter and IEEE adoption
+needed non-obvious fixes found by disassembling the linked NXP SDK libraries
+with `ba-elf-objdump` — the frame counter is persisted via an undocumented PDM
+*bitmap* record rather than a plain value, and IEEE adoption's boot hook was
+calling into a hardware MAC register write before the radio was initialised.
+See [`docs/OCB_UART_ABI.md`](docs/OCB_UART_ABI.md) for the full traces. IEEE
+adoption mutates the live MAC address and has so far only been HIL-verified as
+a same-unit self-restore, not a true two-device migration — treat it as
+freshly re-verified, not long-proven. Flash-TCLK APS counters aren't
+restorable (restored keys re-sync their APS counter on the next exchange). See
+[`docs/OCB_UART_ABI.md`](docs/OCB_UART_ABI.md) for full detail and HIL
+evidence.
 
 > Status: **rev17 is hardware-qualified for the RODRET reset defect and the
 > previously validated network/TX-power paths, not for every optional
@@ -75,7 +91,7 @@ framing and the trailing LQI byte streamed by `vSL_WriteMessage()`. Struct versi
 | `0x0D1B` → `0x8D1B` | Typed OCB EXPORT_END: req 10; rsp 16. |
 | `0x0D1C` → `0x8D1C` | Typed OCB STATUS: req 10; rsp 20. |
 | `0x0D1F` → `0x8D1F` | General diagnostics: empty request; 47-byte response. TCLK fields are `0xFF` with TCLK_UNAVAILABLE set. |
-| `0x0D20`…`0x0D2A` → `0x8D20`…`0x8D2A` | Default-off experimental trusted-UART key export and explicit restore-unavailable stubs. Exact per-opcode layouts are in [`docs/OCB_UART_ABI.md`](docs/OCB_UART_ABI.md). |
+| `0x0D20`…`0x0D2A` → `0x8D20`…`0x8D2A` | Default-off experimental trusted-UART key export and a streamed, field-tagged restore (`0x0D24`..`0x0D28`). Exact per-opcode layouts are in [`docs/OCB_UART_ABI.md`](docs/OCB_UART_ABI.md). |
 | `0x0D2B` → `0x8D2B` | Capability-gated boot reset snapshot: empty req; rsp 6 (`version, status, flags, SYSCTRL-status:u16, exception_reason`). See [`docs/RESET_DIAGNOSTIC_ABI.md`](docs/RESET_DIAGNOSTIC_ABI.md). |
 | `0x0D2C` → `0x8D2C` | Capability-gated retained exception context: empty req; rsp 22 (`version, status, reason, flags, SYSCTRL-status:u16, EPCR:u32, EEAR:u32, SP:u32, LR:u32`). |
 | `0x0806` → `0x8806` | Legacy TX SET: req 1; successful rsp 2 (`six_bit_code, legacy_mapped_level`). Also emits outer `0x8000`; failed SET emits no `0x8806`. |
@@ -85,7 +101,7 @@ framing and the trailing LQI byte streamed by `vSL_WriteMessage()`. Struct versi
 Diagnostic capability bits are: groups bit 0, neighbours bit 1, routes bit 2,
 GP commissioning bit 3 when compiled, TX power bit 9, manufacturer-code
 control bit 10, general diagnostics bit 14, typed OCB metadata bit 15 when
-compiled, experimental key export bit 16 when compiled, and boot reset
+compiled, experimental key export/restore bit 16 when compiled, and boot reset
 summary diagnostics bit 18 and reset-context bit 19. Reserved
 BackupCapable bit 17 is always clear. The wrapper's default GP + typed-OCB
 build advertises `0x00000000000CC60F` and computes
@@ -194,7 +210,7 @@ Every build variable can be overridden from the environment (e.g.
 Relevant non-default builds are explicit:
 
 ```sh
-# Default-off trusted-local-UART key export; restore still returns unsupported.
+# Default-off trusted-local-UART key export + streamed restore (bench-only).
 OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1 sh scripts/build.sh all
 
 # No typed OCB commands or OCB capability bits.

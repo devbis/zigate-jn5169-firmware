@@ -131,20 +131,114 @@ generated coordinator role, one channel-mask entry, and 16-byte network-key
 width. Runtime checks require exactly one channel-mask entry before marking it
 valid.
 
-## Unsupported restore
+## Restore
 
-The default typed metadata subset has no
-`RESTORE_BEGIN/CORE/LINK_KEY/VALIDATE/COMMIT/ABORT` ABI and no restore
-capability bit. The available v2395 raw restore-point code relies on serialized
-internal PDM layouts and cannot safely provide atomic rollback. It is
-intentionally not adapted or exposed. No reboot or persistent mutation occurs
-in this subset.
+The default typed metadata subset (`OCB_TYPED_SUPPORT=1`) still has no restore
+ABI and no restore capability bit; it never mutates persistent state.
 
-The experimental ABI reserves restore-shaped opcodes `0x0D24`…`0x0D28`, but
-they are explicit non-mutating stubs. A valid, unlocked request receives typed
-status `5 RESTORE_UNSUPPORTED`; locked and wrong-version requests receive
-their corresponding statuses instead. No staging record, validation, commit,
-rollback, reset, or reboot is performed.
+The experimental build (`OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1`) implements a
+streamed, field-tagged restore over opcodes `0x0D24`…`0x0D28`, gated by the same
+30-second CHALLENGE/UNLOCK as key export. It is a bench-only, unqualified path:
+it is not authenticated, has no atomic rollback, and never sets the reserved
+BackupCapable bit 17. Run it only against a factory-reset target — recognised
+fields are written into the live NIB/AIB and take effect after the COMMIT reboot.
+
+The restore stream is field-tagged so an image built by a different
+firmware/PDM revision skips unknown field ids instead of corrupting layout.
+`RESTORE_FIELD` carries `field_id:u16, length:u16, value[]`, and an unrecognised
+`field_id` is acknowledged as SKIPPED. The restorable fields are the inverse of
+the export: network key + key sequence + NWK outgoing frame counter, PAN id,
+extended PAN id, channel, network short address, nwkUpdateId, Trust Center
+address + default TC link key + key type, and per-device link keys
+(`RESTORE_LINK`, one per message). HIL-verified byte-for-byte on real JN5169
+hardware, surviving the COMMIT reboot: coordinator IEEE, PAN id, extended PAN
+id, channel, network key, TC link key, **and the NWK outgoing frame counter**.
+
+**NWK outgoing frame counter — how the restore actually works.** v2395's
+`ZPS_vSaveAllZpsRecords()`/`ZPS_vNwkSaveSecMat()` never carry a directly-written
+`sTbl.u32OutFC` into PDM, because the SDK does not persist that field as a
+plain value at all. Root-caused by disassembling `libZPSNWK_JN516x.a`: at boot,
+`ZPS_pvNwkRestoreFrameCounter()` reconstructs `sTbl.u32OutFC` as
+`bitmap_value << shift`, where `bitmap_value` is `PDM_eGetBitmap()`'s output
+for a dedicated PDM *bitmap* record (`PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP`,
+`0xf106`, undocumented in the public headers) — a pure popcount of
+`PDM_eIncrementBitmap()` calls, confirmed via disassembly and an on-device
+readback to be **independent of `PDM_eCreateBitmap()`'s "InitialValue"
+parameter** (the SDK itself always creates this record with `InitialValue 0`,
+in the private helper `vIncrementFrameCounterInPdm`). `shift` is
+`ZPS_u32NwkFcSaveCountBitShift()`, generator-configured via `.zpscfg`'s
+`NwkFcSaveCountBitShift` (`10` → block size 1024 in this build). RESTORE_FIELD
+therefore deletes and recreates that bitmap, then writes `ceil(target/block)`
+via `ePDM_SetBitmapToValue()` in one shot — an exported-but-undeclared symbol
+in `libPDM_EEPROM_NO_RTOS_JN516x.a` found by disassembly, which writes the
+bitmap's `{chain_count, remainder flag bytes}` record state directly instead
+of looping `PDM_eIncrementBitmap()` `ceil(target/block)` times. That loop is
+O(N) per call (linear scan for the next free flag byte, then a full
+segment-header rewrite) — O(N²) overall — and HIL with a frame counter in the
+millions took over 15 minutes and never completed; the one-shot write is O(1)
+regardless of magnitude, which is why no step cap is needed and the host
+script's default timeout could stay at 15s.
+
+**Coordinator IEEE adoption (`field_id 0x000C`) works, after a root-caused
+fix.** HIL testing first found `ZPS_vSetOverrideLocalIeeeAddr()` reliably
+hung boot the instant it was actually invoked with a real value — reproduced
+from both a factory-new boot and an already-networked `E_RUNNING` boot.
+Disassembling `libZPSMAC_Mini_SOC_JN516x.a` / `libMiniMac_JN5169.a`
+(`ba-elf-objdump -dr` on the extracted objects) traced the call chain:
+`ZPS_vSetOverrideLocalIeeeAddr()` → `vAppApiSetMacAddrLocation()` →
+`SOC_ZPS_vMacPibSetExtAddr()` → `vMiniMac_MLME_SetReq_PanId()` →
+`vMMAC_SetRxAddress()` — a hardware MAC register write, not a deferred
+"read this pointer later" hook as the name suggests. The boot hook called it
+*before* `ZPS_eAplAfInit()`, hitting that register before the radio was
+clocked/initialised. Moving the call (in `app_start.c`, gated to this build)
+to run *after* every `ZPS_eAplAfInit()` call fixed it: HIL-verified 3/3
+reliable restore→COMMIT→reboot→verify cycles, including a correct
+byte-for-byte network state afterward. What has **not** been tested: every
+run so far is a self-restore on one physical unit (source IEEE == target
+IEEE) — a true two-device migration with a genuinely different target IEEE,
+and behavior with real paired end devices, remain unverified. See
+`OCBEXP_LIMIT_IEEE_OVERRIDE_UNSAFE` for the full caveat, which stays set as a
+standing caution flag (mutating the live MAC address is inherently risky)
+rather than a "broken" marker.
+
+Per-flash-TCLK APS frame counters remain unrestorable — v2395 exposes no
+API — so a restored key starts with a zero APS counter that re-syncs on the next
+exchange (`OCBEXP_LIMIT_FLASH_TCLK_COUNTERS`). COMMIT persists via
+`ZPS_vSaveAllZpsRecords()` and reboots; there is no rollback, so keep the unit
+powered throughout it.
+
+**Boot reliability on erased/factory-new PDM**: this is a *separate* issue from
+the IEEE-adoption hang above. An early build of this experimental image showed
+an unreliable boot on a truly erased-PDM/factory-new target regardless of IEEE
+adoption. A settle delay at the top of `vInitialiseApp()`
+(`vOCBExpBootSettleDelay()`, still present, gated to this build) empirically
+fixed it: dozens of consecutive erase-PDM boot cycles have since succeeded in
+HIL testing, plus multiple full backup→restore→reboot→verify round trips
+including directly onto a never-networked target.
+
+Unlike the IEEE-adoption hang, this one is not *proven* via disassembly (no
+JTAG or logic analyzer was available to observe the actual hardware signals),
+but disassembling `libPDM_EEPROM_NO_RTOS_JN516x.a` and
+`libHardwareApi_JN5169.a` narrowed it to a specific, evidence-backed
+mechanism rather than a vague guess: `PDM_eInitialise()`, on truly blank PDM
+(always the case in this HIL scenario), calls
+`iPDM_CreateFileSystemInRAM()` → `vPDM_GenerateCleanFileSystem()`, which loops
+`iAHI_EraseEEPROMsegment()` over every flash segment. Each call runs
+`bAHI_InitialiseEEPROM()`, which writes an MMIO "enable" pattern (`0x10100`)
+to register `0x1000090` — but *only* on this boot's very first EEPROM
+operation, gated by a global counter (`u8EEPROMinitialiseCount == 0`); every
+later call in the same erase loop writes `0` there instead. The erase command
+that follows (via registers `0x1000080`/`0x1000084`) is paced by a fixed
+16-iteration dummy-write loop, not a hardware-ready poll. If that one-time
+enable races the EEPROM/flash controller's own post-reset settle time, and the
+fixed 16-cycle pad doesn't cover it, a command issued into the controller's
+internal reset window is a plausible way to wedge it — consistent with a hang
+inside a per-segment erase loop that clears only on a real hardware reset.
+`vOCBExpBootSettleDelay()` sits exactly where this theory says it needs to:
+before the very first PDM/EEPROM hardware access this boot performs. Treat
+this mechanism as evidence-backed, not confirmed, and this delay as a
+characterized empirical workaround rather than a datasheet-verified fix;
+re-verify after any source change that alters this binary's size or timing.
 
 ## Experimental trusted-local-serial key export
 
@@ -193,16 +287,19 @@ is checked against the JN5169 tick timer.
 | `0x0D21` / `0x8D21` UNLOCK | req 14: common + `nonce:u32, confirmation:u32`; rsp 12: prefix + `ttl:u8, limitations:u32` |
 | `0x0D22` / `0x8D22` SECRET_CORE | req 6; rsp 61: prefix + `available:u32, limitations:u32, nwk_seq:u8, nwk_key[16], nwk_out:u32, tc_type:u8, tc_key[16], tc_out:u32, tc_in:u32` |
 | `0x0D23` / `0x8D23` LINK_KEY | req 8: common + `kind:u8, index:u8`; rsp 46: prefix + `kind:u8, index:u8, eui64:u64, available:u32, key_type:u8, key[16], aps_out:u32, aps_in:u32` |
-| `0x0D24` / `0x8D24` RESTORE_BEGIN | req 6; rsp 11: prefix + `limitations:u32`; valid unlocked status is RESTORE_UNSUPPORTED |
-| `0x0D25` / `0x8D25` RESTORE_CORE | req 6; rsp 11: prefix + `limitations:u32`; valid unlocked status is RESTORE_UNSUPPORTED |
-| `0x0D26` / `0x8D26` RESTORE_LINK | req 6; rsp 11: prefix + `limitations:u32`; valid unlocked status is RESTORE_UNSUPPORTED |
-| `0x0D27` / `0x8D27` VALIDATE | req 6; rsp 11: prefix + `limitations:u32`; valid unlocked status is RESTORE_UNSUPPORTED |
-| `0x0D28` / `0x8D28` COMMIT | req 6; rsp 11: prefix + `limitations:u32`; valid unlocked status is RESTORE_UNSUPPORTED |
+| `0x0D24` / `0x8D24` RESTORE_BEGIN | req 6; rsp 15: prefix + `restore_caps:u32, limitations:u32`. Starts a restore session. |
+| `0x0D25` / `0x8D25` RESTORE_FIELD | req ≥10: `abi, schema, txn` + `field_id:u16, length:u16, value[length]`; rsp 10: prefix + `field_id:u16, result:u8` (`0` applied, `1` skipped-unknown, `2` bad-length, `3` unavailable). Repeatable. |
+| `0x0D26` / `0x8D26` RESTORE_LINK | req 31: `abi, schema, txn` + `eui64, key_type:u8, key[16]`; rsp 17: prefix + `eui64, result:u8, aps_counter_lost:u8(1)`. Repeatable, one per device. |
+| `0x0D27` / `0x8D27` VALIDATE | req 6; rsp 12: prefix + `present:u32, mandatory_ok:u8`. No writes. |
+| `0x0D28` / `0x8D28` COMMIT | req 6; rsp 11: prefix + `present:u32`. On OK persists and reboots (reply emitted first). |
 | `0x0D29` / `0x8D29` STATUS | req 6; rsp 13: prefix + `unlocked:u8, ttl:u8, limitations:u32` |
 | `0x0D2A` / `0x8D2A` ABORT | req 6; rsp 11: prefix + `limitations:u32`; immediately wipes unlock state |
 
 Experimental typed statuses are `0 OK`, `1 BAD_VERSION`, `2 LOCKED`,
-`3 NOT_FOUND`, `4 LAYOUT_MISMATCH`, and `5 RESTORE_UNSUPPORTED`.
+`3 NOT_FOUND`, `4 LAYOUT_MISMATCH`, `5 NO_SESSION` (a restore op with no prior
+RESTORE_BEGIN), `6 INCOMPLETE` (VALIDATE/COMMIT before all mandatory fields are
+present), and `7 BAD_FIELD`. Status `5` was `RESTORE_UNSUPPORTED` while the
+restore opcodes were stubs; values `0`…`4` keep their export-path meaning.
 
 Availability bits are: network key bit 0, NWK outgoing counter bit 1, TC/APS
 link-key bytes bit 2, APS outgoing counter bit 3, APS incoming counter bit 4,
@@ -220,10 +317,12 @@ through volatile stores after `vSL_WriteMessage()` returns.
 
 ### Capability truth
 
-Diagnostic capability bit 16 means only **experimental trusted-serial key
-export**. Reserved bit 17 is the production-qualified BackupCapable bit and is
-never included in `DIAG_CAP_BITMAP`. Restore is not advertised. Experimental
-builds report limitation bits for:
+Diagnostic capability bit 16 means **experimental trusted-serial key export and
+streamed restore**. Reserved bit 17 is the production-qualified BackupCapable bit
+and is never included in `DIAG_CAP_BITMAP`; implementing restore does not set it,
+because the path is unauthenticated, non-atomic, and unqualified. The restore
+capabilities available in a session are reported positively in the RESTORE_BEGIN
+response (`restore_caps:u32`). Experimental builds report limitation bits for:
 
 - bit 0: no authentication or encryption;
 - bit 1: unavailable flash-TCLK counters;
@@ -261,12 +360,19 @@ descriptor. Runtime checks require security-material count 2, APS key-table
 size 1, MAC table size 36, all required pointers non-null, and the generated
 legacy configuration before any key is copied.
 
-The restore-point API can carry NWK security material and a live APS key map,
-and PDM offers typed application records. However, v2395 provides no supported
-per-flash-TCLK counter get/set API, while this coordinator stores up to 70
-credentials in the separate TCLK flash area. Applying keys without preserving
-and increasing those counters risks replay rejection or counter rollback.
-Further, no atomic rollback contract is documented for a multi-record
-restore-point/PDM/TCLK update, and IEEE override would mutate the live MAC PIB.
-Therefore no staged record is created and COMMIT cannot mutate or reboot the
-device. Partial restore is less safe than an explicit unsupported result.
+The experimental restore applies fields through typed ZPS setters and direct
+NIB/AIB writes (the inverse of the verified export), then
+`ZPS_vSaveAllZpsRecords()` + reboot — not the raw restore-point/serialized-PDM
+path, which is layout-fragile across versions. The NWK outgoing frame counter
+is the one field that needed a different mechanism than a direct struct write
+(see above); it restores correctly via the PDM bitmap it's actually persisted
+through. A limit inherent to v2395 remains surfaced rather than hidden: there
+is no supported per-flash-TCLK counter get/set API (up to 70 credentials in
+the TCLK flash area), so a restored link key starts with a zero APS counter
+that re-syncs on the next exchange; and no atomic rollback contract exists for
+the multi-record COMMIT, so the unit must stay powered through it. Coordinator
+IEEE adoption via `ZPS_vSetOverrideLocalIeeeAddr()` **works**: it hung boot
+when the boot-time call ran before `ZPS_eAplAfInit()` (disassembly-root-caused
+to a hardware MAC register write reached before the radio was up), and is
+fixed by calling it after instead (see above and
+`OCBEXP_LIMIT_IEEE_OVERRIDE_UNSAFE`).

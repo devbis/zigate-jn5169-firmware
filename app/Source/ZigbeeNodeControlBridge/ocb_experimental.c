@@ -17,6 +17,7 @@
 #include "AppApi.h"
 #include "AHI_AES.h"
 #include "PDM.h"
+#include "PDM_IDs.h"
 #include "pdum_apl.h"
 #include "zps_gen.h"
 #include "zps_apl.h"
@@ -24,6 +25,7 @@
 #include "zps_apl_aib.h"
 #include "zps_apl_af.h"
 #include "zps_nwk_nib.h"
+#include "zps_nwk_pub.h"
 #include "zps_nwk_sec.h"
 #include "rnd_pub.h"
 #include "ocb_experimental.h"
@@ -61,11 +63,46 @@ extern PUBLIC bool_t zps_bGetFlashCredential(uint64 u64IeeeAddr,
                                               bool_t bTcCred,
                                               bool_t bUpdate);
 
+/* This symbol is exported (T, not just referenced) by this repo's own
+ * libPDM_EEPROM_NO_RTOS_JN516x.a alongside PDM_eIncrementBitmap/PDM_eGetBitmap
+ * but omitted from PDM.h. Disassembly of PDM_Bitmap.o -- from THIS repo's
+ * library, not assumed from the ZiGate port even though the two SDKs are
+ * confirmed-different vintages elsewhere (e.g. ZPS_u32NwkFcSaveCountBitShift()
+ * is a function here vs a plain global there) -- confirms this component is
+ * unchanged between the two: same signature, same 8-byte
+ * {initial_value, chain_count} header, same divisor 44, and PDM_eGetBitmap's
+ * read path (chain_count*44 + popcount) agrees with what this writes. See
+ * the comment on OCBEXP_FIELD_NWK_OUT_FC below for why this replaces a
+ * PDM_eIncrementBitmap() loop. */
+extern PDM_teStatus ePDM_SetBitmapToValue(uint16 u16IdValue, uint32 u32Value);
+
+/* Deferred-reboot flag drained by APP_vIdentifyEffectEnd() (app_Znc_cmds.c). The
+ * companion timer handle u8IdTimer is declared in app_common.h. Setting the flag
+ * and arming the timer is the firmware's standard "reply first, then reset" idiom
+ * (see E_SL_MSG_RESET / APP_vFactoryResetRecords). */
+extern PUBLIC bool_t bResetIssued;
+
+/* Dedicated ZTimer for the unlock deadline (opened in app_start.c). ZTimer.c
+ * already owns the AHI hardware Tick Timer as its own periodic tick source, so
+ * the unlock window is a real ZTimer deadline, not raw register arithmetic;
+ * see the comment on OCBEXP_UNLOCK_SECONDS in ocb_experimental.h. */
+extern uint8 u8OcbUnlockTimer;
+
 PRIVATE uint8 s_au8ExpTx[OCBEXP_TX_MAX];
 PRIVATE uint32 s_u32Challenge;
 PRIVATE uint32 s_u32UnlockTransaction;
-PRIVATE uint32 s_u32UnlockStarted;
 PRIVATE bool_t s_bUnlocked;
+
+/* Streamed-restore session state. Kept intentionally tiny (no whole-image RAM
+ * buffer): identity/keys are applied straight into the live NIB/AIB as fields
+ * arrive; only the opt-in adopted IEEE is staged until COMMIT persists it. */
+PRIVATE bool_t s_bRestoreSession;
+PRIVATE uint32 s_u32RestorePresent;
+PRIVATE bool_t s_bAdoptIeeeStaged;
+PRIVATE uint64 s_u64AdoptIeee;
+/* Program-lifetime backing store for ZPS_vSetOverrideLocalIeeeAddr(), which
+ * keeps the pointer (not the value). Written once at boot from PDM. */
+PRIVATE uint64 s_u64OverrideIeee;
 
 PRIVATE void vExpWipe(void *pvData, uint16 u16Length)
 {
@@ -124,36 +161,35 @@ PRIVATE void vExpLock(void)
     s_bUnlocked = FALSE;
     s_u32Challenge = 0U;
     s_u32UnlockTransaction = 0U;
-    s_u32UnlockStarted = 0U;
+    ZTIMER_eStop(u8OcbUnlockTimer);
+    /* Losing the unlock also abandons any in-progress restore. The already
+     * applied (unpersisted) NIB/AIB changes are discarded on the next reboot. */
+    s_bRestoreSession = FALSE;
+    s_u32RestorePresent = 0U;
+    s_bAdoptIeeeStaged = FALSE;
+    s_u64AdoptIeee = 0U;
+}
+
+/* ZTimer callback: fires OCBEXP_UNLOCK_SECONDS after the deadline was last
+ * (re)armed by CHALLENGE or a successful UNLOCK. Authoritatively ends the
+ * unlock window; bExpUnlocked() below needs no elapsed-time math at all. */
+PUBLIC void OCBEXP_vUnlockTimeout(void *pvParam)
+{
+    (void)pvParam;
+    vExpLock();
 }
 
 PRIVATE bool_t bExpUnlocked(uint32 u32Transaction)
 {
-    uint32 u32Elapsed;
-    if (!s_bUnlocked || s_u32UnlockTransaction != u32Transaction)
-    {
-        return FALSE;
-    }
-    u32Elapsed = u32AHI_TickTimerRead() - s_u32UnlockStarted;
-    if (u32Elapsed > OCBEXP_UNLOCK_TICKS)
-    {
-        vExpLock();
-        return FALSE;
-    }
-    return TRUE;
+    return s_bUnlocked && s_u32UnlockTransaction == u32Transaction;
 }
 
+/* Advisory only (the real gate is bExpUnlocked()/the ZTimer deadline): ZTimer
+ * exposes no "time remaining" query, so report the fixed window width while
+ * unlocked rather than an exact countdown. */
 PRIVATE uint8 u8ExpRemainingSeconds(uint32 u32Transaction)
 {
-    uint32 u32Elapsed;
-    uint32 u32Remaining;
-    if (!bExpUnlocked(u32Transaction))
-    {
-        return 0U;
-    }
-    u32Elapsed = u32AHI_TickTimerRead() - s_u32UnlockStarted;
-    u32Remaining = OCBEXP_UNLOCK_TICKS - u32Elapsed;
-    return (uint8)((u32Remaining + OCBEXP_TICK_HZ - 1U) / OCBEXP_TICK_HZ);
+    return bExpUnlocked(u32Transaction) ? OCBEXP_UNLOCK_SECONDS : 0U;
 }
 
 PRIVATE bool_t bExpLayoutValid(ZPS_tsNwkNib *psNib, ZPS_tsAplAib *psAib)
@@ -189,7 +225,7 @@ PUBLIC void OCBEXP_vHandleChallenge(uint16 u16Len, const uint8 *pu8Rx)
     {
         s_u32Challenge = RND_u32GetRand(1U, 0xFFFFFFFFUL);
         s_u32UnlockTransaction = u32Transaction;
-        s_u32UnlockStarted = u32AHI_TickTimerRead();
+        ZTIMER_eStart(u8OcbUnlockTimer, ZTIMER_TIME_SEC(OCBEXP_UNLOCK_SECONDS));
     }
     u8Length = u8ExpPrefix(u32Transaction, u8Status);
     ZNC_BUF_U32_UPD(&s_au8ExpTx[u8Length], s_u32Challenge, u8Length);
@@ -204,7 +240,6 @@ PUBLIC void OCBEXP_vHandleUnlock(uint16 u16Len, const uint8 *pu8Rx)
     uint32 u32Transaction;
     uint32 u32Nonce;
     uint32 u32Confirmation;
-    uint32 u32Elapsed;
     uint8 u8Length;
     uint8 u8Status = OCBEXP_STATUS_LOCKED;
     if (!bExpParse(E_SL_MSG_OCBEXP_UNLOCK_REQ, u16Len, OCBEXP_UNLOCK_REQ_LEN,
@@ -220,17 +255,20 @@ PUBLIC void OCBEXP_vHandleUnlock(uint16 u16Len, const uint8 *pu8Rx)
     {
         u32Nonce = ZNC_RTN_U32(pu8Rx, 6);
         u32Confirmation = ZNC_RTN_U32(pu8Rx, 10);
-        u32Elapsed = u32AHI_TickTimerRead() - s_u32UnlockStarted;
+        /* No manual elapsed check: a CHALLENGE past OCBEXP_UNLOCK_SECONDS is
+         * already retired by OCBEXP_vUnlockTimeout(), which zeroes
+         * s_u32UnlockTransaction, so a late UNLOCK fails the match below on
+         * its own. */
         if (u32Transaction == s_u32UnlockTransaction &&
             u32Nonce == s_u32Challenge &&
-            u32Elapsed <= OCBEXP_UNLOCK_TICKS &&
             u32Confirmation ==
                 (u32Nonce ^ u32Transaction ^ OCBEXP_CONFIRM_MAGIC))
         {
             s_bUnlocked = TRUE;
-            s_u32UnlockStarted = u32AHI_TickTimerRead();
             s_u32Challenge = 0U;
             u8Status = OCBEXP_STATUS_OK;
+            /* Grant the full window from the moment of unlock. */
+            ZTIMER_eStart(u8OcbUnlockTimer, ZTIMER_TIME_SEC(OCBEXP_UNLOCK_SECONDS));
         }
     }
     if (u8Status != OCBEXP_STATUS_OK) { vExpLock(); }
@@ -427,22 +465,385 @@ PUBLIC void OCBEXP_vHandleLinkKey(uint16 u16Len, const uint8 *pu8Rx)
     vExpWipe(s_au8ExpTx, sizeof(s_au8ExpTx));
 }
 
-PUBLIC void OCBEXP_vHandleRestoreUnavailable(uint16 u16Type, uint16 u16RspType,
-                                             uint16 u16Len, const uint8 *pu8Rx)
+/* ------------------------------------------------------------------------- *
+ *  Streamed restore (0x0D24..0x0D28)
+ *
+ *  Trust model, atomicity, and the flash-TCLK counter gap match the export
+ *  path documented at the top of this file and in docs/OCB_UART_ABI.md. Run
+ *  restore only on a factory-reset target: recognised fields are written into
+ *  the live NIB/AIB and only take effect after the COMMIT reboot. There is no
+ *  atomic rollback across COMMIT.
+ * ------------------------------------------------------------------------- */
+
+/* Shared version/unlock/session gate for the fixed-length restore ops. */
+PRIVATE uint8 u8RestoreGate(uint32 u32Transaction, const uint8 *pu8Rx,
+                            bool_t bNeedSession)
+{
+    if (!bExpVersion(pu8Rx))                    { return OCBEXP_STATUS_BAD_VERSION; }
+    if (!bExpUnlocked(u32Transaction))          { return OCBEXP_STATUS_LOCKED; }
+    if (bNeedSession && !s_bRestoreSession)     { return OCBEXP_STATUS_NO_SESSION; }
+    return OCBEXP_STATUS_OK;
+}
+
+/* Apply one recognised restore field into the live NIB/AIB. Unknown ids are
+ * skipped (forward compatibility across firmware/PDM revisions). */
+PRIVATE uint8 u8RestoreApplyField(uint16 u16FieldId, uint16 u16FieldLen,
+                                  const uint8 *pu8Val, void *pvNwk,
+                                  ZPS_tsNwkNib *psNib, ZPS_tsAplAib *psAib)
+{
+    switch (u16FieldId)
+    {
+    case OCBEXP_FIELD_NWK_KEY:
+        if (u16FieldLen != 16U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        memcpy(psNib->sTbl.psSecMatSet[0].au8Key, pu8Val, 16U);
+        psNib->sTbl.psSecMatSet[0].u8KeyType = ZPS_NWK_SEC_NETWORK_KEY;
+        s_u32RestorePresent |= OCBEXP_PRESENT_NWK_KEY;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_NWK_KEY_SEQ:
+        if (u16FieldLen != 1U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        psNib->sTbl.psSecMatSet[0].u8KeySeqNum = pu8Val[0];
+        psNib->sPersist.u8ActiveKeySeqNumber = pu8Val[0];
+        s_u32RestorePresent |= OCBEXP_PRESENT_NWK_KEY_SEQ;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_NWK_OUT_FC:
+    {
+        uint32 u32Target, u32Shift, u32Block, u32Steps;
+        if (u16FieldLen != 4U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        /* Bump past the backed-up value so no peer sees a replayed counter. */
+        u32Target = ZNC_RTN_U32(pu8Val, 0) + OCBEXP_NWK_OUTFC_MARGIN;
+        /* Sets this session's live counter, but on its own this does NOT
+         * survive a reboot: disassembly of libZPSNWK_JN516x.a
+         * (ZPS_pvNwkRestoreFrameCounter) shows the SDK reconstructs
+         * sTbl.u32OutFC at boot as `bitmap_value << shift`, where
+         * bitmap_value is PDM_eGetBitmap()'s pu32BitmapValue output for
+         * PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP -- a pure popcount of
+         * PDM_eIncrementBitmap() calls made on that record, HIL-confirmed
+         * NOT seeded by PDM_eCreateBitmap()'s "InitialValue" parameter (that
+         * read back as 0 regardless; the SDK itself always creates this
+         * record with InitialValue 0, in vIncrementFrameCounterInPdm).
+         *
+         * Reaching a target bitmap value used to mean calling
+         * PDM_eIncrementBitmap() that many times, which is O(N) per call
+         * (linear scan of the record for the next free flag byte, then a
+         * full segment-header rewrite) -- O(N^2) overall. HIL with a frame
+         * counter in the millions (u32Steps in the thousands) took over 15
+         * minutes and never completed. Disassembling THIS repo's own
+         * libPDM_EEPROM_NO_RTOS_JN516x.a (not assumed from the ZiGate port,
+         * even though the two SDKs are confirmed-different vintages
+         * elsewhere) found ePDM_SetBitmapToValue() writes the equivalent
+         * {chain_count, remainder flag bytes} state directly in one write --
+         * confirmed against PDM_eGetBitmap's read path by reading both the
+         * write and read disassembly. O(1) regardless of magnitude, so no
+         * step cap is needed. */
+        psNib->sTbl.u32OutFC = u32Target;
+        u32Shift = ZPS_u32NwkFcSaveCountBitShift();
+        if (u32Shift > 31U) { u32Shift = 31U; }
+        u32Block = 1UL << u32Shift;
+        u32Steps = (u32Target + u32Block - 1UL) / u32Block; /* ceiling */
+        (void)PDM_eDeleteBitmap(PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP);
+        (void)PDM_eCreateBitmap(PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP, 0U);
+        (void)ePDM_SetBitmapToValue(PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP, u32Steps);
+        s_u32RestorePresent |= OCBEXP_PRESENT_NWK_OUT_FC;
+        return OCBEXP_FIELD_APPLIED;
+    }
+
+    case OCBEXP_FIELD_PAN_ID:
+        if (u16FieldLen != 2U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        ZPS_vNwkNibSetPanId(pvNwk, ZNC_RTN_U16(pu8Val, 0));
+        s_u32RestorePresent |= OCBEXP_PRESENT_PAN_ID;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_EXT_PAN_ID:
+    {
+        uint64 u64Ext;
+        if (u16FieldLen != 8U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        u64Ext = ZNC_RTN_U64(pu8Val, 0);
+        ZPS_vNwkNibSetExtPanId(pvNwk, u64Ext);
+        (void)ZPS_eAplAibSetApsUseExtendedPanId(u64Ext);
+        s_u32RestorePresent |= OCBEXP_PRESENT_EXT_PAN_ID;
+        return OCBEXP_FIELD_APPLIED;
+    }
+
+    case OCBEXP_FIELD_CHANNEL:
+        if (u16FieldLen != 1U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        ZPS_vNwkNibSetChannel(pvNwk, pu8Val[0]);
+        s_u32RestorePresent |= OCBEXP_PRESENT_CHANNEL;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_NWK_ADDR:
+        if (u16FieldLen != 2U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        ZPS_vNwkNibSetNwkAddr(pvNwk, ZNC_RTN_U16(pu8Val, 0));
+        s_u32RestorePresent |= OCBEXP_PRESENT_NWK_ADDR;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_NWK_UPDATE_ID:
+        if (u16FieldLen != 1U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        ZPS_vNwkNibSetUpdateId(pvNwk, pu8Val[0]);
+        s_u32RestorePresent |= OCBEXP_PRESENT_NWK_UPDATE_ID;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_TC_ADDR:
+        if (u16FieldLen != 8U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        psAib->u64ApsTrustCenterAddress = ZNC_RTN_U64(pu8Val, 0);
+        s_u32RestorePresent |= OCBEXP_PRESENT_TC_ADDR;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_TC_LINK_KEY:
+        if (u16FieldLen != 16U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        memcpy(psAib->psAplDefaultTCAPSLinkKey->au8LinkKey, pu8Val, 16U);
+        s_u32RestorePresent |= OCBEXP_PRESENT_TC_LINK_KEY;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_TC_KEY_TYPE:
+        if (u16FieldLen != 1U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        psAib->u8KeyType = pu8Val[0];
+        s_u32RestorePresent |= OCBEXP_PRESENT_TC_KEY_TYPE;
+        return OCBEXP_FIELD_APPLIED;
+
+    case OCBEXP_FIELD_ADOPT_IEEE:
+        if (u16FieldLen != 8U) { return OCBEXP_FIELD_BAD_LENGTH; }
+        /* Staged; persisted at COMMIT and applied by the boot hook, AFTER
+         * ZPS_eAplAfInit() -- see OCBEXP_vApplyAdoptedIeeeAtBoot() for why
+         * that ordering matters. */
+        s_u64AdoptIeee = ZNC_RTN_U64(pu8Val, 0);
+        s_bAdoptIeeeStaged = TRUE;
+        s_u32RestorePresent |= OCBEXP_PRESENT_ADOPT_IEEE;
+        return OCBEXP_FIELD_APPLIED;
+
+    default:
+        return OCBEXP_FIELD_SKIPPED_UNKNOWN;
+    }
+}
+
+PUBLIC void OCBEXP_vHandleRestoreBegin(uint16 u16Len, const uint8 *pu8Rx)
 {
     uint32 u32Transaction;
     uint8 u8Length, u8Status;
-    if (!bExpParse(u16Type, u16Len, OCBEXP_REQ_LEN, pu8Rx, &u32Transaction))
+    if (!bExpParse(E_SL_MSG_OCBEXP_RESTORE_BEGIN_REQ, u16Len, OCBEXP_REQ_LEN,
+                   pu8Rx, &u32Transaction))
     {
         return;
     }
-    if (!bExpVersion(pu8Rx)) { u8Status = OCBEXP_STATUS_BAD_VERSION; }
-    else if (!bExpUnlocked(u32Transaction)) { u8Status = OCBEXP_STATUS_LOCKED; }
-    else { u8Status = OCBEXP_STATUS_RESTORE_UNSUPPORTED; }
+    u8Status = u8RestoreGate(u32Transaction, pu8Rx, FALSE);
+    if (u8Status == OCBEXP_STATUS_OK)
+    {
+        s_bRestoreSession = TRUE;
+        s_u32RestorePresent = 0U;
+        s_bAdoptIeeeStaged = FALSE;
+        s_u64AdoptIeee = 0U;
+    }
     u8Length = u8ExpPrefix(u32Transaction, u8Status);
+    ZNC_BUF_U32_UPD(&s_au8ExpTx[u8Length], OCBEXP_RCAP_BITMAP, u8Length);
     ZNC_BUF_U32_UPD(&s_au8ExpTx[u8Length], OCBEXP_LIMIT_BITMAP, u8Length);
-    vSL_WriteMessage(u16RspType, u8Length, s_au8ExpTx, 0);
+    vSL_WriteMessage(E_SL_MSG_OCBEXP_RESTORE_BEGIN_RSP, u8Length, s_au8ExpTx, 0);
     vExpWipe(s_au8ExpTx, sizeof(s_au8ExpTx));
+}
+
+PUBLIC void OCBEXP_vHandleRestoreField(uint16 u16Len, const uint8 *pu8Rx)
+{
+    uint32 u32Transaction;
+    uint16 u16FieldId, u16FieldLen;
+    uint8 u8Length, u8Status, u8Result = OCBEXP_FIELD_UNAVAILABLE;
+    const uint8 *pu8Val;
+    void *pvNwk;
+    ZPS_tsNwkNib *psNib;
+    ZPS_tsAplAib *psAib;
+
+    /* Variable-length payload: bExpParse's exact-length check cannot be used. */
+    if (u16Len < OCBEXP_RESTORE_FIELD_MIN_LEN)
+    {
+        vExpSendOuterStatus(E_SL_MSG_OCBEXP_RESTORE_CORE_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+    u32Transaction = ZNC_RTN_U32(pu8Rx, 2);
+    u16FieldId  = ZNC_RTN_U16(pu8Rx, 6);
+    u16FieldLen = ZNC_RTN_U16(pu8Rx, 8);
+    if ((uint32)u16Len != (uint32)OCBEXP_RESTORE_FIELD_MIN_LEN + u16FieldLen)
+    {
+        vExpSendOuterStatus(E_SL_MSG_OCBEXP_RESTORE_CORE_REQ,
+                            E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+    vExpSendOuterStatus(E_SL_MSG_OCBEXP_RESTORE_CORE_REQ,
+                        E_SL_MSG_STATUS_SUCCESS);
+    pu8Val = &pu8Rx[OCBEXP_RESTORE_FIELD_MIN_LEN];
+
+    u8Status = u8RestoreGate(u32Transaction, pu8Rx, TRUE);
+    if (u8Status == OCBEXP_STATUS_OK)
+    {
+        pvNwk = ZPS_pvAplZdoGetNwkHandle();
+        psNib = ZPS_psNwkNibGetHandle(pvNwk);
+        psAib = ZPS_psAplAibGetAib();
+        if (!bExpLayoutValid(psNib, psAib))
+        {
+            u8Result = OCBEXP_FIELD_UNAVAILABLE;
+        }
+        else
+        {
+            u8Result = u8RestoreApplyField(u16FieldId, u16FieldLen, pu8Val,
+                                           pvNwk, psNib, psAib);
+        }
+    }
+
+    u8Length = u8ExpPrefix(u32Transaction, u8Status);
+    ZNC_BUF_U16_UPD(&s_au8ExpTx[u8Length], u16FieldId, u8Length);
+    ZNC_BUF_U8_UPD(&s_au8ExpTx[u8Length], u8Result, u8Length);
+    vSL_WriteMessage(E_SL_MSG_OCBEXP_RESTORE_CORE_RSP, u8Length, s_au8ExpTx, 0);
+    vExpWipe(s_au8ExpTx, sizeof(s_au8ExpTx));
+}
+
+PUBLIC void OCBEXP_vHandleRestoreLink(uint16 u16Len, const uint8 *pu8Rx)
+{
+    uint32 u32Transaction;
+    uint64 u64Eui;
+    uint8 u8Length, u8Status, u8KeyType, u8Result = OCBEXP_FIELD_UNAVAILABLE;
+    uint8 au8Key[16];
+
+    if (!bExpParse(E_SL_MSG_OCBEXP_RESTORE_LINK_REQ, u16Len,
+                   OCBEXP_RESTORE_LINK_REQ_LEN, pu8Rx, &u32Transaction))
+    {
+        return;
+    }
+    u64Eui    = ZNC_RTN_U64(pu8Rx, 6);
+    u8KeyType = pu8Rx[14];
+    memcpy(au8Key, &pu8Rx[15], 16U);
+
+    u8Status = u8RestoreGate(u32Transaction, pu8Rx, TRUE);
+    if (u8Status == OCBEXP_STATUS_OK)
+    {
+        if (u64Eui == 0U || u64Eui == 0xFFFFFFFFFFFFFFFFULL)
+        {
+            u8Result = OCBEXP_FIELD_BAD_LENGTH;   /* invalid EUI64 */
+        }
+        /* ZPS_teStatus success == 0. Adds/replaces the descriptor keyed by EUI,
+         * routing to the flash TCLK store as needed. */
+        else if (ZPS_eAplZdoAddReplaceLinkKey(u64Eui, au8Key,
+                     (ZPS_teApsLinkKeyType)u8KeyType) == 0U)
+        {
+            (void)ZPS_eAplAibSetDeviceApsKeyType(u64Eui, u8KeyType);
+            s_u32RestorePresent |= OCBEXP_PRESENT_LINK_KEY;
+            u8Result = OCBEXP_FIELD_APPLIED;
+        }
+        else
+        {
+            u8Result = OCBEXP_FIELD_UNAVAILABLE;
+        }
+    }
+
+    u8Length = u8ExpPrefix(u32Transaction, u8Status);
+    ZNC_BUF_U64_UPD(&s_au8ExpTx[u8Length], u64Eui, u8Length);
+    ZNC_BUF_U8_UPD(&s_au8ExpTx[u8Length], u8Result, u8Length);
+    /* APS frame counter is never restored (v2395 exposes no flash-TCLK counter
+     * API); it re-syncs on the next APS exchange. Flag it unconditionally. */
+    ZNC_BUF_U8_UPD(&s_au8ExpTx[u8Length], 1U, u8Length);
+    vSL_WriteMessage(E_SL_MSG_OCBEXP_RESTORE_LINK_RSP, u8Length, s_au8ExpTx, 0);
+    vExpWipe(au8Key, sizeof(au8Key));
+    vExpWipe(s_au8ExpTx, sizeof(s_au8ExpTx));
+}
+
+PUBLIC void OCBEXP_vHandleValidate(uint16 u16Len, const uint8 *pu8Rx)
+{
+    uint32 u32Transaction;
+    uint8 u8Length, u8Status, u8MandatoryOk;
+    if (!bExpParse(E_SL_MSG_OCBEXP_VALIDATE_REQ, u16Len, OCBEXP_REQ_LEN,
+                   pu8Rx, &u32Transaction))
+    {
+        return;
+    }
+    u8Status = u8RestoreGate(u32Transaction, pu8Rx, TRUE);
+    u8MandatoryOk = (u8Status == OCBEXP_STATUS_OK &&
+                     (s_u32RestorePresent & OCBEXP_PRESENT_MANDATORY) ==
+                         OCBEXP_PRESENT_MANDATORY) ? 1U : 0U;
+    u8Length = u8ExpPrefix(u32Transaction, u8Status);
+    ZNC_BUF_U32_UPD(&s_au8ExpTx[u8Length], s_u32RestorePresent, u8Length);
+    ZNC_BUF_U8_UPD(&s_au8ExpTx[u8Length], u8MandatoryOk, u8Length);
+    vSL_WriteMessage(E_SL_MSG_OCBEXP_VALIDATE_RSP, u8Length, s_au8ExpTx, 0);
+    vExpWipe(s_au8ExpTx, sizeof(s_au8ExpTx));
+}
+
+PUBLIC void OCBEXP_vHandleCommit(uint16 u16Len, const uint8 *pu8Rx)
+{
+    uint32 u32Transaction, u32Present;
+    uint8 u8Length, u8Status;
+    if (!bExpParse(E_SL_MSG_OCBEXP_COMMIT_REQ, u16Len, OCBEXP_REQ_LEN,
+                   pu8Rx, &u32Transaction))
+    {
+        return;
+    }
+    u8Status = u8RestoreGate(u32Transaction, pu8Rx, TRUE);
+    if (u8Status == OCBEXP_STATUS_OK &&
+        (s_u32RestorePresent & OCBEXP_PRESENT_MANDATORY) !=
+            OCBEXP_PRESENT_MANDATORY)
+    {
+        u8Status = OCBEXP_STATUS_INCOMPLETE;
+    }
+    u32Present = s_u32RestorePresent;
+
+    if (u8Status == OCBEXP_STATUS_OK)
+    {
+        /* Opt-in adopted coordinator IEEE: persisted here, applied at the next
+         * cold boot by OCBEXP_vApplyAdoptedIeeeAtBoot() AFTER ZPS_eAplAfInit(). */
+        if (s_bAdoptIeeeStaged)
+        {
+            PDM_eSaveRecordData(PDM_ID_APP_OCB_ADOPT_IEEE, &s_u64AdoptIeee,
+                                sizeof(s_u64AdoptIeee));
+        }
+        /* Boot formed on the restored network. */
+        sZllState.eState       = NOT_FACTORY_NEW;
+        sZllState.eNodeState   = E_RUNNING;
+        sZllState.u8DeviceType = 0U;      /* coordinator */
+        sZllState.u16MyAddr    = 0x0000U;
+        PDM_eSaveRecordData(PDM_ID_APP_ZLL_CMSSION, &sZllState,
+                            sizeof(sZllState));
+        /* Serialise NIB / AIB / key material / tables to PDM. Network key,
+         * PAN/ext-PAN/channel, and TC/link keys reach PDM correctly through
+         * this call (HIL-verified byte-for-byte). The NWK outgoing frame
+         * counter does not: see OCBEXP_LIMIT_FC_NOT_RESTORED. */
+        ZPS_vSaveAllZpsRecords();
+    }
+
+    u8Length = u8ExpPrefix(u32Transaction, u8Status);
+    ZNC_BUF_U32_UPD(&s_au8ExpTx[u8Length], u32Present, u8Length);
+    /* Reply BEFORE arming the reboot so the host receives the result. */
+    vSL_WriteMessage(E_SL_MSG_OCBEXP_COMMIT_RSP, u8Length, s_au8ExpTx, 0);
+    vExpWipe(s_au8ExpTx, sizeof(s_au8ExpTx));
+
+    if (u8Status == OCBEXP_STATUS_OK)
+    {
+        vExpLock();
+        bResetIssued = TRUE;
+        ZTIMER_eStart(u8IdTimer, ZTIMER_TIME_MSEC(1));
+    }
+}
+
+/* Coordinator IEEE adoption. HIL testing (2026-08-31) first found a reliable
+ * boot hang the instant ZPS_vSetOverrideLocalIeeeAddr() was invoked, called
+ * from here BEFORE ZPS_eAplAfInit(). Root-caused by disassembling
+ * libZPSMAC_Mini_SOC_JN516x.a / libMiniMac_JN5169.a (ba-elf-objdump -dr):
+ * ZPS_vSetOverrideLocalIeeeAddr() is not a deferred "read this pointer later"
+ * hook. Its callee vAppApiSetMacAddrLocation() synchronously tail-calls
+ * SOC_ZPS_vMacPibSetExtAddr(), which chains through
+ * vMiniMac_MLME_SetReq_PanId() into vMMAC_SetRxAddress() -- a hardware MAC
+ * register write. Called before ZPS_eAplAfInit() brings the radio up, that
+ * write hit unclocked/uninitialised hardware and hung. This call site was
+ * moved (see app_start.c) to run AFTER ZPS_eAplAfInit() in every boot branch;
+ * HIL-retest before trusting this on another unit or SDK revision. */
+PUBLIC void OCBEXP_vApplyAdoptedIeeeAtBoot(void)
+{
+    uint64 u64Ieee = 0U;
+    uint16 u16Read = 0U;
+    (void)PDM_eReadDataFromRecord(PDM_ID_APP_OCB_ADOPT_IEEE, &u64Ieee,
+                                  sizeof(u64Ieee), &u16Read);
+    if (u16Read == sizeof(u64Ieee) &&
+        u64Ieee != 0U && u64Ieee != 0xFFFFFFFFFFFFFFFFULL)
+    {
+        /* ZPS keeps the pointer, so the value must live for the whole program. */
+        s_u64OverrideIeee = u64Ieee;
+        ZPS_vSetOverrideLocalIeeeAddr(&s_u64OverrideIeee);
+    }
 }
 
 PUBLIC void OCBEXP_vHandleStatus(uint16 u16Len, const uint8 *pu8Rx)

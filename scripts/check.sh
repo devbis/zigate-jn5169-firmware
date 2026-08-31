@@ -207,10 +207,48 @@ grep -q 'OCBEXP_CONFIRM_MAGIC' "$OCB_EXP_H"
 grep -q 'The nonce confirmation is an accidental-invocation guard' "$OCB_EXP_H"
 grep -q 'OCBEXP_LIMIT_NO_AUTH_OR_ENCRYPTION' "$OCB_EXP_H"
 grep -q 'OCBEXP_LIMIT_FLASH_TCLK_COUNTERS' "$OCB_EXP_H"
-grep -q 'OCBEXP_STATUS_RESTORE_UNSUPPORTED' "$OCB_EXP_C"
 grep -q 'vExpWipe(au8NwkKey' "$OCB_EXP_C"
 grep -q 'vExpWipe(au8TcKey' "$OCB_EXP_C"
 grep -q 'vExpWipe(&uFlashKey' "$OCB_EXP_C"
+
+# Experimental streamed restore (0x0D24..0x0D28) is IMPLEMENTED but remains
+# unqualified: the old non-mutating RestoreUnavailable stub must be gone, the
+# real handlers must exist and be dispatched, and it must never set the reserved
+# BackupCapable bit 17 (asserted below). The restore field carrier skips unknown
+# field ids so a differently-versioned image cannot corrupt PDM layout.
+if grep -q 'OCBEXP_vHandleRestoreUnavailable' "$OCB_EXP_C" "$OCB_EXP_H" "$ZNC_CMDS"; then
+    echo "restore is implemented; the RestoreUnavailable stub must be removed" >&2
+    exit 1
+fi
+grep -q 'OCBEXP_vHandleRestoreBegin' "$OCB_EXP_C"
+grep -q 'OCBEXP_vHandleRestoreField' "$OCB_EXP_C"
+grep -q 'OCBEXP_vHandleRestoreLink' "$OCB_EXP_C"
+grep -q 'OCBEXP_vHandleValidate' "$OCB_EXP_C"
+grep -q 'OCBEXP_vHandleCommit' "$OCB_EXP_C"
+grep -q 'OCBEXP_FIELD_SKIPPED_UNKNOWN' "$OCB_EXP_C"
+grep -q 'OCBEXP_vHandleCommit' "$ZNC_CMDS"
+# COMMIT must emit its response frame BEFORE arming the deferred reboot, so the
+# host always receives the result.
+awk '
+    /vSL_WriteMessage\(E_SL_MSG_OCBEXP_COMMIT_RSP/ { w = NR }
+    /bResetIssued *= *TRUE/                        { if (!r) r = NR }
+    END { exit (w && r && w < r) ? 0 : 1 }
+' "$OCB_EXP_C" || {
+    echo "COMMIT must reply before arming the reboot" >&2
+    exit 1
+}
+# The adopted-IEEE override is applied at boot AFTER every ZPS_eAplAfInit()
+# call (HIL root-caused: it hangs boot when the radio isn't clocked/initialised
+# yet), gated by the experimental flag, and only from the dedicated PDM record.
+grep -Eq '^#define[[:space:]]+PDM_ID_APP_OCB_ADOPT_IEEE[[:space:]]+0x12$' "$PDM_IDS"
+awk '
+    /^[[:space:]]*OCBEXP_vApplyAdoptedIeeeAtBoot[[:space:]]*\([[:space:]]*\)[[:space:]]*;/ { a = NR }
+    /^[[:space:]]*ZPS_eAplAfInit[[:space:]]*\([[:space:]]*\)[[:space:]]*;/ { f = NR }
+    END { exit (a && f && a > f) ? 0 : 1 }
+' "$START" || {
+    echo "adopted-IEEE override must be applied after every ZPS_eAplAfInit() call" >&2
+    exit 1
+}
 
 # Publication docs must track the exact default gates, negotiation constants,
 # every typed OCB opcode pair, and the explicit lack of restore qualification.
@@ -220,7 +258,8 @@ grep -q 'INSECURE_DEV_RAW_PDM=0' "$README"
 grep -qi '0x00000000000cc60f' "$OCB_DOC"
 grep -qi 'DIAG_FW_BUILD_ID=0x010dc53d' "$OCB_DOC"
 grep -q 'Reserved diagnostic bit 17' "$OCB_DOC"
-grep -q 'status `5 RESTORE_UNSUPPORTED`' "$OCB_DOC"
+grep -q '5 NO_SESSION' "$OCB_DOC"
+grep -q 'RESTORE_FIELD' "$OCB_DOC"
 for opcode in 18 19 1A 1B 1C 20 21 22 23 24 25 26 27 28 29 2A
 do
     grep -qi "0x0D$opcode.*0x8D$opcode" "$OCB_DOC" || {

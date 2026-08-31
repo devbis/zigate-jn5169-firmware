@@ -34,7 +34,9 @@ Current added/changed UART surfaces are:
 - removed/reserved TCLK request `0x0D00`, which emits only outer `0x8000`
   UNHANDLED_COMMAND and never `0x8D00`;
 - default-off experimental `0x0D20/0x8D20`…`0x0D2A/0x8D2A`, with
-  `0x0D24`…`0x0D28` implemented only as restore-unavailable stubs;
+  `0x0D24`…`0x0D28` implementing a streamed, field-tagged restore
+  (BEGIN/FIELD/LINK/VALIDATE/COMMIT) that is bench-only and unqualified and
+  never sets the reserved BackupCapable bit 17;
 - legacy TX power `0x0806/0x8806` and `0x0807/0x8807`, retaining their
   two-byte value responses while adding exact-code validation and SET
   persistence;
@@ -239,17 +241,125 @@ hash. This records reproducibility of the historical source only; no image was
 flashed and no OCB UART exchange, reset behavior, counter correctness, or
 current TX-persistence integration was hardware-qualified.
 
-### Default-off experimental trusted-serial key export
+### Default-off experimental trusted-serial key export and restore
 
 `OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1` adds a 30-second public nonce
 confirmation and typed export of the active network key/counter, default TC
 link key/counters, the one generated live APS key-table slot, and up to 70
 flash TCLK credentials by index. It does not claim authentication or
-confidentiality. Flash-TCLK counters cannot be read or restored through a
-supported v2395 API, so restore commands return a precise unsupported status,
-do not create PDM staging data, do not mutate active state, and do not reboot.
-Experimental capability bit 16 is advertised; reserved production
-BackupCapable bit 17 remains clear.
+confidentiality.
+
+The same flag now also implements a streamed, field-tagged **restore**
+(`0x0D24`…`0x0D28`): `RESTORE_FIELD` carries `{field_id, length, value}` and
+skips unknown field ids so a differently-versioned image cannot corrupt PDM
+layout. Recognised fields (network key/seq/counter, PAN id, ext PAN id, channel,
+short address, nwkUpdateId, TC address/key/type, per-device link keys, and
+opt-in coordinator-IEEE adoption) are applied through typed ZPS setters and
+direct NIB/AIB writes — the inverse of the export — then persisted with
+`ZPS_vSaveAllZpsRecords()` and a deferred reboot. It is bench-only and
+unqualified: there is no authentication and no atomic rollback (keep the unit
+powered through COMMIT). Experimental capability bit 16 is advertised;
+reserved production BackupCapable bit 17 remains clear. A reference host
+driver is in `scripts/ocb_backup.py` (`scripts/ocb_gw.py` is a stdlib-only
+variant for running directly on a gateway host).
+
+**HIL results (real JN5169, 2026-08-31 – 2026-09-01):** network key, PAN id,
+extended PAN id, channel, TC link key, the NWK outgoing frame counter, **and
+coordinator-IEEE adoption** were all verified to restore correctly and survive
+the COMMIT reboot — including restoring directly onto a target whose PDM had
+just been fully erased (factory-new), across dozens of consecutive erase-PDM
+boot cycles with no failure on the final build, and 3/3 independent
+adopt-IEEE restore→reboot→verify cycles. Two of these needed non-obvious
+fixes found by disassembling the linked NXP SDK static libraries with
+`ba-elf-objdump -dr` — not just source inspection, since the relevant logic is
+closed-source.
+
+**The NWK outgoing frame counter fix.** The firmware writes the backed-up
+value into the live NIB before COMMIT, but that alone does not survive a
+reboot — `ZPS_vSaveAllZpsRecords()`/`ZPS_vNwkSaveSecMat()` never carry a
+directly-written `sTbl.u32OutFC` into PDM, because v2395 does not persist that
+field as a plain value at all. Disassembling `libZPSNWK_JN516x.a`
+(`zps_nwk_nib.o`) showed `ZPS_pvNwkRestoreFrameCounter()` reconstructing it at
+boot as `bitmap_value << shift` from a dedicated, publicly-undocumented PDM
+*bitmap* record (`PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP`, `0xf106`) —
+`bitmap_value` being `PDM_eGetBitmap()`'s output, a pure popcount of
+`PDM_eIncrementBitmap()` calls, confirmed via an on-device readback to be
+independent of `PDM_eCreateBitmap()`'s "InitialValue" parameter (which the SDK
+itself always passes as `0`). `shift` is `ZPS_u32NwkFcSaveCountBitShift()`,
+`.zpscfg`-configured (`NwkFcSaveCountBitShift="10"` in this build, block size
+1024). The fix deletes and recreates that bitmap, then writes
+`ceil(target/block)` via `ePDM_SetBitmapToValue()` in one shot. That symbol is
+exported-but-undeclared in `libPDM_EEPROM_NO_RTOS_JN516x.a`, found by
+disassembling `PDM_Bitmap.o`: it writes the bitmap's
+`{chain_count, remainder flag bytes}` record state directly instead of the
+previous `PDM_eIncrementBitmap()` `ceil(target/block)`-times loop, which is
+O(N) per call (linear scan for the next free flag byte, then a full
+segment-header rewrite) — O(N²) overall, and HIL with a frame counter in the
+millions took over 15 minutes and never completed. The one-shot write is O(1)
+regardless of magnitude, so `OCBEXP_FC_MAX_INC_STEPS` was removed rather than
+raised. HIL-measured ~800 steps (for this test network's counter) took a few
+seconds under the old loop; the host scripts' default timeout was raised from
+2s to 15s accordingly and did not need raising again for the one-shot write.
+HIL-confirmed the restored counter (817159 → 820226, above the 818183 target)
+survives the reboot and continues incrementing correctly from the restored
+baseline.
+
+**The coordinator-IEEE adoption fix.** This was initially thought to be
+unfixable and shipped as disabled, on the theory that
+`ZPS_vSetOverrideLocalIeeeAddr()` itself was broken on this hardware/SDK
+combination. Disassembling `libZPSMAC_Mini_SOC_JN516x.a`
+(`vAppApiSetMacAddrLocation` in `zps_mac_shim.o`) and `libMiniMac_JN5169.a`
+(`vMiniMac_MLME_SetReq_PanId` in `Mini_Main.o`) traced the real call chain:
+`ZPS_vSetOverrideLocalIeeeAddr()` → `vAppApiSetMacAddrLocation()` →
+`SOC_ZPS_vMacPibSetExtAddr()` → `vMiniMac_MLME_SetReq_PanId()` →
+`vMMAC_SetRxAddress()` — a hardware MAC register write, executed
+*synchronously* the moment the function is called, not deferred as its name
+suggests. The boot hook called it *before* `ZPS_eAplAfInit()` (which brings up
+the radio), hitting that register before it was clocked/initialised — a
+classic "peripheral not ready" hang. Moving the call in `app_start.c` to run
+*after* every `ZPS_eAplAfInit()` call (both the `E_RUNNING` and factory-new
+boot branches) fixed it outright: 3/3 independent HIL cycles (erase PDM →
+restore with `--adopt-ieee` → COMMIT → reboot → verify) succeeded, with the
+adopted IEEE, network identity, and frame counter all correct afterward. What
+remains untested: every HIL run so far is a self-restore on one physical unit
+(source IEEE == target IEEE) — a true two-device migration with a genuinely
+different target IEEE, and behavior against real paired end devices, are
+still unverified. `OCBEXP_LIMIT_IEEE_OVERRIDE_UNSAFE` stays set as a standing
+caution flag for that reason, not as a "broken" marker.
+
+**Boot reliability on erased/factory-new PDM — a separate issue.** An early
+build of this experimental image showed an unreliable boot on a truly
+erased-PDM/factory-new target, independent of IEEE adoption. A settle delay at
+the top of `vInitialiseApp()` (`vOCBExpBootSettleDelay()`, still present,
+gated to this build) empirically fixed it: dozens of consecutive erase-PDM
+boot cycles have since succeeded in HIL testing.
+
+Unlike the two fixes above, this one is not *proven* via disassembly — no
+JTAG or logic analyzer was available to observe the actual hardware signals —
+but disassembling `libPDM_EEPROM_NO_RTOS_JN516x.a`
+(`PDM_Create.o`/`PDM_FileSystemGenerate.o`) and `libHardwareApi_JN5169.a`
+(`EEP_EEPROM.o`) narrowed it to a specific, evidence-backed mechanism rather
+than a vague guess. `PDM_eInitialise()`, on truly blank PDM (always the case
+in this HIL scenario), calls `iPDM_CreateFileSystemInRAM()` →
+`vPDM_GenerateCleanFileSystem()`, which loops `iAHI_EraseEEPROMsegment()` over
+every flash segment. Each call runs `bAHI_InitialiseEEPROM()`, which writes an
+MMIO "enable" pattern (`0x10100`) to register `0x1000090` — but *only* on this
+boot's very first EEPROM operation, gated by a global counter
+(`u8EEPROMinitialiseCount == 0`); every later call in the same erase loop
+writes `0` there instead. The erase command that follows (via registers
+`0x1000080`/`0x1000084`) is paced by a fixed 16-iteration dummy-write loop,
+not a hardware-ready poll. If that one-time enable races the EEPROM/flash
+controller's own post-reset settle time, and the fixed 16-cycle pad doesn't
+cover it, a command issued into the controller's internal reset window is a
+plausible way to wedge it — consistent with a hang inside a per-segment erase
+loop that clears only on a real hardware reset (matching HIL observations:
+`jntool soft_reset` alone did not always recover the device; a full
+`jnflash`/GPIO reset cycle did). `vOCBExpBootSettleDelay()` sits exactly where
+this theory says it needs to: before the very first PDM/EEPROM hardware access
+this boot performs. Treat this mechanism as evidence-backed, not confirmed,
+and this delay as a characterized empirical workaround rather than a
+datasheet-verified fix; re-verify after any source change that alters this
+binary's size or timing.
 
 Historical pre-TX-persistence experimental pinned-BA2 build:
 

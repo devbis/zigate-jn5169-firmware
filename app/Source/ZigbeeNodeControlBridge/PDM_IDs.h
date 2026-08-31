@@ -72,6 +72,13 @@ extern "C" {
  * EEPROM PDM cannot reliably replace that record with a different size. */
 #define PDM_ID_APP_TX_POWER_V1_RESERVED     0x11
 #define PDM_ID_APP_TX_POWER                 0x12
+/* Adopted coordinator IEEE/EUI64 staged by an experimental OCB restore. Only
+ * written/read when OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=1; the bare macro has no
+ * effect on the default image. Applied at boot AFTER ZPS_eAplAfInit() (not
+ * before -- HIL root-caused a boot hang from applying it too early; see the
+ * comment on OCBEXP_vApplyAdoptedIeeeAtBoot() in ocb_experimental.c) via
+ * ZPS_vSetOverrideLocalIeeeAddr(). */
+#define PDM_ID_APP_OCB_ADOPT_IEEE           0x13
 
 #define PDM_ID_INTERNAL_AIB                 0xf000
 #define PDM_ID_INTERNAL_BINDS               0xf001
@@ -79,6 +86,17 @@ extern "C" {
 #define PDM_ID_INTERNAL_APS_KEYS            0xf003
 #define PDM_ID_INTERNAL_TC_TABLE            0xf004
 #define PDM_ID_INTERNAL_TC_LOCATIONS        0xf005
+/* Undocumented in the public SDK headers; identified by disassembling
+ * libZPSNWK_JN516x.a (vIncrementFrameCounterInPdm/ZPS_pvNwkRestoreFrameCounter
+ * in zps_nwk_nib.o). This is a PDM *bitmap* record (PDM_eCreateBitmap /
+ * PDM_eIncrementBitmap / PDM_eGetBitmap, NOT PDM_eSaveRecordData): the SDK
+ * persists the NWK outgoing frame counter only periodically, every
+ * 1<<ZPS_u32NwkFcSaveCountBitShift() increments (=1024 for this build's
+ * .zpscfg, NwkFcSaveCountBitShift="10"), and on boot reconstructs
+ * sTbl.u32OutFC as PDM_eGetBitmap's bitmap-value output left-shifted by that
+ * same amount. PDM_ID_INTERNAL_SEC_MATERIAL_KEY (0xf105) does NOT carry the
+ * counter -- ZPS_tsNwkSecMaterialSet has no such field. */
+#define PDM_ID_INTERNAL_NWK_OUT_FC_BITMAP   0xf106
 #define PDM_ID_INTERNAL_NIB_PERSIST         0xf100
 #define PDM_ID_INTERNAL_CHILD_TABLE         0xf101
 #define PDM_ID_INTERNAL_SHORT_ADDRESS_MAP   0xf102
