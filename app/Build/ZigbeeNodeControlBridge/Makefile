@@ -238,8 +238,6 @@ LDFLAGS += -Wl,-u$(INTERRUPT_HANDLER_BBC) -Wl,-defsym,vAHI_IntHandlerBbc_select=
 
 endif
 
-override LDFLAGS += -Wl,--wrap=zps_psFindKeyDescr
-
 ###############################################################################
 # Application Source files
 # Note: Path to source file is found using vpath below, so only .c filename is required
@@ -356,6 +354,10 @@ include $(SDK_BASE_DIR)/Chip/Common/Build/config.mk
 include $(SDK_BASE_DIR)/Platform/Common/Build/config.mk
 include $(SDK_BASE_DIR)/Stack/Common/Build/config.mk
 include $(SDK_BASE_DIR)/Components/BDB/Build/config.mk
+
+# Apply mandatory interposition after SDK includes. Using override earlier
+# prevents their LDFLAGS += search paths from taking effect.
+override LDFLAGS += -Wl,--wrap=zps_psFindKeyDescr
 
 ###############################################################################
 
