@@ -68,7 +68,10 @@ extern "C" {
 #define PDM_ID_APP_GROUP_TABLE      0x3
 
 #define PDM_ID_APP_VERSION                  0x10
-#define PDM_ID_APP_TX_POWER                 0x11
+/* Permanently reserved: rev9 wrote an ABI-padded eight-byte v1 TX record.
+ * EEPROM PDM cannot reliably replace that record with a different size. */
+#define PDM_ID_APP_TX_POWER_V1_RESERVED     0x11
+#define PDM_ID_APP_TX_POWER                 0x12
 
 #define PDM_ID_INTERNAL_AIB                 0xf000
 #define PDM_ID_INTERNAL_BINDS               0xf001

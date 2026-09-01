@@ -74,6 +74,9 @@
 #include "zigate_compat.h"
 #include "Log.h"
 #include "SerialLink.h"
+#ifdef APP_AHI_CONTROL
+#include "app_ahi_commands.h"
+#endif
 
 #include "zps_struct.h"
 
@@ -1802,6 +1805,17 @@ PUBLIC void APP_vBdbCallback(BDB_tsBdbEvent *psBdbEvent)
         case BDB_EVENT_NONE:
             break;
         case BDB_EVENT_ZPSAF:                // Use with BDB_tsZpsAfEvent
+#ifdef APP_AHI_CONTROL
+            /*
+             * Observe the stack-wide event before endpoint routing. Apply is
+             * deferred until bdb_taskBDB() returns to the application loop.
+             */
+            if (psBdbEvent->uEventData.sZpsAfEvent.sStackEvent.eType ==
+                    ZPS_EVENT_NWK_STARTED)
+            {
+                APP_vAHINotifyNetworkStarted();
+            }
+#endif
             if ( psBdbEvent->uEventData.sZpsAfEvent.u8EndPoint ==  0 )
             {
                 APP_vHandleStackEvents ( &psBdbEvent->uEventData.sZpsAfEvent.sStackEvent );

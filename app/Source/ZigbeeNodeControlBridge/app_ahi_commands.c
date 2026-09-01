@@ -42,7 +42,7 @@
 
 #define APP_TX_POWER_RECORD_MAGIC_0       (0x54U) /* 'T' */
 #define APP_TX_POWER_RECORD_MAGIC_1       (0x58U) /* 'X' */
-#define APP_TX_POWER_RECORD_VERSION       (1U)
+#define APP_TX_POWER_RECORD_VERSION       (2U)
 #define APP_TX_POWER_RECORD_CRC_SEED      (0xFFU)
 #define APP_TX_POWER_RECORD_CRC_POLY      (0x07U)
 
@@ -57,7 +57,10 @@ typedef struct
     uint8 u8Version;
     uint8 u8TxPower;
     uint8 u8Check;
-} tsAPP_TxPowerRecord;
+} PACK tsAPP_TxPowerRecord;
+
+typedef char tsAPP_TxPowerRecordMustBeFiveBytes[
+        (sizeof(tsAPP_TxPowerRecord) == 5U) ? 1 : -1];
 
 /****************************************************************************/
 /***        Local Function Prototypes                                     ***/
@@ -69,6 +72,9 @@ PRIVATE void vAPP_AHISetTxPower(uint16 u16PacketLength, uint8 *pu8LinkRxBuffer, 
 PRIVATE void vAPP_AHIGetTxPower(uint32 *u32TxPower, eAHI_Status *peAHIStatus);
 PRIVATE bool_t bAPP_AHIIsValidTxPower(uint8 u8TxPower);
 PRIVATE uint8 u8APP_AHITxPowerRecordCheck(const tsAPP_TxPowerRecord *psRecord);
+PRIVATE bool_t bAPP_AHIIsValidTxPowerRecord(
+        const tsAPP_TxPowerRecord *psRecord,
+        uint16 u16BytesRead);
 PRIVATE bool_t bAPP_AHILoadStoredTxPower(uint8 *pu8TxPower);
 PRIVATE bool_t bAPP_AHISaveTxPower(uint8 u8TxPower);
 /****************************************************************************/
@@ -81,6 +87,7 @@ PRIVATE bool_t bAPP_AHISaveTxPower(uint8 u8TxPower);
 
 PRIVATE bool_t bAPP_AHIStoredTxPowerLoaded;
 PRIVATE bool_t bAPP_AHIStoredTxPowerValid;
+PRIVATE bool_t bAPP_AHITxPowerApplyPending;
 PRIVATE uint8 u8APP_AHIStoredTxPower;
 
 /****************************************************************************/
@@ -143,20 +150,41 @@ PUBLIC uint32 APP_vCMDHandleAHICommand(uint16 u16PacketType,
 
 /****************************************************************************
  *
- * NAME: APP_vAHIApplyPersistedTxPower
+ * NAME: APP_vAHINotifyNetworkStarted
  *
  * DESCRIPTION:
- * Reapplies the application-owned TX-power PIB on every NWK_STARTED event.
- * BDB has processed that event before forwarding it to the application, so
- * the associated MLME reset/default-PIB work is complete. The validated PDM
- * record is cached, so later events neither reread nor write PDM.
+ * Records every genuine stack NWK_STARTED indication at the generated ZPS
+ * callback boundary. Applying is deferred until bdb_taskBDB() has consumed
+ * all queued events for this main-loop pass, so no BDB/MLME start work can
+ * overwrite the restored PIB in the same pass.
  *
  ****************************************************************************/
-PUBLIC void APP_vAHIApplyPersistedTxPower(void)
+PUBLIC void APP_vAHINotifyNetworkStarted(void)
+{
+    bAPP_AHITxPowerApplyPending = TRUE;
+}
+
+/****************************************************************************
+ *
+ * NAME: APP_vAHIServicePersistedTxPower
+ *
+ * DESCRIPTION:
+ * Reapplies the cached application-owned TX-power PIB once for each observed
+ * NWK_STARTED indication. PDM is loaded at most once per boot and restore
+ * never writes PDM.
+ *
+ ****************************************************************************/
+PUBLIC void APP_vAHIServicePersistedTxPower(void)
 {
     uint8 u8TxPower;
     uint32 u32OldTxPower;
     uint32 u32ReadBack;
+
+    if (!bAPP_AHITxPowerApplyPending)
+    {
+        return;
+    }
+    bAPP_AHITxPowerApplyPending = FALSE;
 
     if (!bAPP_AHILoadStoredTxPower(&u8TxPower) ||
         eAppApiPlmeGet(PHY_PIB_ATTR_TX_POWER, &u32OldTxPower) !=
@@ -215,6 +243,18 @@ PRIVATE uint8 u8APP_AHITxPowerRecordCheck(const tsAPP_TxPowerRecord *psRecord)
     return u8Check;
 }
 
+PRIVATE bool_t bAPP_AHIIsValidTxPowerRecord(
+        const tsAPP_TxPowerRecord *psRecord,
+        uint16 u16BytesRead)
+{
+    return (u16BytesRead == sizeof(*psRecord) &&
+            psRecord->u8Magic0 == APP_TX_POWER_RECORD_MAGIC_0 &&
+            psRecord->u8Magic1 == APP_TX_POWER_RECORD_MAGIC_1 &&
+            psRecord->u8Version == APP_TX_POWER_RECORD_VERSION &&
+            psRecord->u8Check == u8APP_AHITxPowerRecordCheck(psRecord) &&
+            bAPP_AHIIsValidTxPower(psRecord->u8TxPower));
+}
+
 PRIVATE bool_t bAPP_AHILoadStoredTxPower(uint8 *pu8TxPower)
 {
     tsAPP_TxPowerRecord sRecord;
@@ -228,12 +268,7 @@ PRIVATE bool_t bAPP_AHILoadStoredTxPower(uint8 *pu8TxPower)
                                      &sRecord,
                                      sizeof(sRecord),
                                      &u16BytesRead) == PDM_E_STATUS_OK &&
-             u16BytesRead == sizeof(sRecord) &&
-             sRecord.u8Magic0 == APP_TX_POWER_RECORD_MAGIC_0 &&
-             sRecord.u8Magic1 == APP_TX_POWER_RECORD_MAGIC_1 &&
-             sRecord.u8Version == APP_TX_POWER_RECORD_VERSION &&
-             sRecord.u8Check == u8APP_AHITxPowerRecordCheck(&sRecord) &&
-             bAPP_AHIIsValidTxPower(sRecord.u8TxPower));
+             bAPP_AHIIsValidTxPowerRecord(&sRecord, u16BytesRead));
 
         if (bAPP_AHIStoredTxPowerValid)
         {
@@ -253,7 +288,9 @@ PRIVATE bool_t bAPP_AHILoadStoredTxPower(uint8 *pu8TxPower)
 PRIVATE bool_t bAPP_AHISaveTxPower(uint8 u8TxPower)
 {
     tsAPP_TxPowerRecord sRecord;
+    tsAPP_TxPowerRecord sReadBack;
     uint8 u8StoredTxPower;
+    uint16 u16BytesRead = 0;
 
     if (bAPP_AHILoadStoredTxPower(&u8StoredTxPower) &&
         u8StoredTxPower == u8TxPower)
@@ -269,7 +306,13 @@ PRIVATE bool_t bAPP_AHISaveTxPower(uint8 u8TxPower)
 
     if (PDM_eSaveRecordData(PDM_ID_APP_TX_POWER,
                             &sRecord,
-                            sizeof(sRecord)) == PDM_E_STATUS_OK)
+                            sizeof(sRecord)) == PDM_E_STATUS_OK &&
+        PDM_eReadDataFromRecord(PDM_ID_APP_TX_POWER,
+                                &sReadBack,
+                                sizeof(sReadBack),
+                                &u16BytesRead) == PDM_E_STATUS_OK &&
+        bAPP_AHIIsValidTxPowerRecord(&sReadBack, u16BytesRead) &&
+        sReadBack.u8TxPower == u8TxPower)
     {
         bAPP_AHIStoredTxPowerValid = TRUE;
         u8APP_AHIStoredTxPower = u8TxPower;

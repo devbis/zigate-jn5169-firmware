@@ -87,9 +87,14 @@ typedef enum
 /***        Local Function Prototypes                                     ***/
 /****************************************************************************/
 
-PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length, uint8 *pu8Data);
+PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length, const uint8 *pu8Data);
 
 PRIVATE void vSL_TxByte(bool bSpecialCharacter, uint8 u8Data);
+PRIVATE uint8 u8SL_CalculateCRCWithLqi(uint16 u16Type,
+                                      uint16 u16PayloadLength,
+                                      const uint8 *pu8Data,
+                                      uint8 u8LinkQuality);
+PRIVATE uint8 u8SL_CRCUpdate(uint8 u8CRC, uint8 u8Data);
 PRIVATE void vLogInit(void);
 PRIVATE void vLogPutch(char c);
 PRIVATE void vLogFlush(void);
@@ -252,17 +257,21 @@ PUBLIC bool bSL_ReadMessage(uint16 *pu16Type, uint16 *pu16Length, uint16 u16MaxL
  * RETURNS:
  * void
  ****************************************************************************/
-PUBLIC void vSL_WriteMessage(uint16 u16Type, uint16 u16Length, uint8 *pu8Data, uint8 u8LinkQuality)
+PUBLIC void vSL_WriteMessage(uint16 u16Type,
+                             uint16 u16Length,
+                             const uint8 *pu8Data,
+                             uint8 u8LinkQuality)
 {
     int n;
     uint8 u8CRC;
+    uint16 u16WireLength = u16Length + 1U;
 
-    u16Length++;
+    u8CRC = u8SL_CalculateCRCWithLqi(u16Type,
+                                     u16Length,
+                                     pu8Data,
+                                     u8LinkQuality);
 
-    pu8Data[u16Length-1]=u8LinkQuality;
-    u8CRC = u8SL_CalculateCRC(u16Type, u16Length, pu8Data);
-
-    DBG_vPrintf(DEBUG_SL, "\nvSL_WriteMessage(%d, %d, %02x)", u16Type, u16Length, u8CRC);
+    DBG_vPrintf(DEBUG_SL, "\nvSL_WriteMessage(%d, %d, %02x)", u16Type, u16WireLength, u8CRC);
 
     /* Send start character */
     vSL_TxByte(TRUE, SL_START_CHAR);
@@ -273,8 +282,8 @@ PUBLIC void vSL_WriteMessage(uint16 u16Type, uint16 u16Length, uint8 *pu8Data, u
 
     /* Send message length */
 
-    vSL_TxByte(FALSE, (u16Length >> 8) & 0xff);
-    vSL_TxByte(FALSE, (u16Length >> 0) & 0xff);
+    vSL_TxByte(FALSE, (u16WireLength >> 8) & 0xff);
+    vSL_TxByte(FALSE, (u16WireLength >> 0) & 0xff);
 
 
     /* Send message checksum */
@@ -285,6 +294,7 @@ PUBLIC void vSL_WriteMessage(uint16 u16Type, uint16 u16Length, uint8 *pu8Data, u
     {
         vSL_TxByte(FALSE, pu8Data[n]);
     }
+    vSL_TxByte(FALSE, u8LinkQuality);
 
     /* Send end character */
     vSL_TxByte(TRUE, SL_END_CHAR);
@@ -398,7 +408,6 @@ PUBLIC void vSL_LogInit(void)
 /***        Local Functions                                               ***/
 /****************************************************************************/
 
-#ifndef CCITT_CRC
 /****************************************************************************
  *
  * NAME: u8SL_CalculateCRC
@@ -413,26 +422,52 @@ PUBLIC void vSL_LogInit(void)
  * RETURNS:
  * CRC of packet
  ****************************************************************************/
-PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length, uint8 *pu8Data)
+PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type,
+                              uint16 u16Length,
+                              const uint8 *pu8Data)
 {
+    uint16 n;
+    uint8 u8CRC = 0;
 
-    int n;
-    uint8 u8CRC;
-
-    u8CRC  = (u16Type   >> 0) & 0xff;
-    u8CRC ^= (u16Type   >> 8) & 0xff;
-    u8CRC ^= (u16Length >> 0) & 0xff;
-    u8CRC ^= (u16Length >> 8) & 0xff;
-
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16Type   >> 0) & 0xff);
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16Type   >> 8) & 0xff);
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16Length >> 0) & 0xff);
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16Length >> 8) & 0xff);
     for(n = 0; n < u16Length; n++)
     {
-        u8CRC ^= pu8Data[n];
+        u8CRC = u8SL_CRCUpdate(u8CRC, pu8Data[n]);
     }
-
     return(u8CRC);
 }
 
+PRIVATE uint8 u8SL_CalculateCRCWithLqi(uint16 u16Type,
+                                      uint16 u16PayloadLength,
+                                      const uint8 *pu8Data,
+                                      uint8 u8LinkQuality)
+{
+    uint16 n;
+    uint16 u16WireLength = u16PayloadLength + 1U;
+    uint8 u8CRC = 0;
+
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16Type       >> 0) & 0xff);
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16Type       >> 8) & 0xff);
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16WireLength >> 0) & 0xff);
+    u8CRC = u8SL_CRCUpdate(u8CRC, (u16WireLength >> 8) & 0xff);
+    for(n = 0; n < u16PayloadLength; n++)
+    {
+        u8CRC = u8SL_CRCUpdate(u8CRC, pu8Data[n]);
+    }
+    return u8SL_CRCUpdate(u8CRC, u8LinkQuality);
+}
+
+PRIVATE uint8 u8SL_CRCUpdate(uint8 u8CRC, uint8 u8Data)
+{
+#ifdef CCITT_CRC
+    return u8CCITT_CRC(u8CRC, u8Data);
+#else
+    return u8CRC ^ u8Data;
 #endif
+}
 
 /****************************************************************************
  *
@@ -609,41 +644,7 @@ PRIVATE uint8 u8CCITT_CRC(uint8 u8CRCIn, uint8 u8Val)
 	return u8CRCOut;
 }
 
-/****************************************************************************
- *
- * NAME: u8SL_CalculateCRC
- *
- * DESCRIPTION:
- * Calculate CRC of packet. Includes Length, Type then Data.
- *
- * PARAMETERS: Name                  RW  Usage
- *             u8Length              R   Message length
- *             u8Type                R   Message type
- *             pu8Data               R   Message payload
- * RETURNS:
- * CRC of packet
- ****************************************************************************/
-PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length,  uint8 *pu8Data)
-{
-    uint16 n;
-    uint8 u8CRC=0;
-
-    u8CRC = 0;		/* 	seed with zero */
-    u8CRC  = u8CCITT_CRC(u8CRC, ((u16Type   >> 0) & 0xff));
-    u8CRC  = u8CCITT_CRC(u8CRC, ((u16Type   >> 8) & 0xff));
-    u8CRC  = u8CCITT_CRC(u8CRC, ((u16Length >> 0) & 0xff));
-    u8CRC  = u8CCITT_CRC(u8CRC, ((u16Length >> 8) & 0xff));
-
-    for(n = 0; n < u16Length; n++)
-    {
-        u8CRC = u8CCITT_CRC(u8CRC, pu8Data[n]);
-    }
-    return u8CRC;
-}
-
-
 #endif
 /****************************************************************************/
 /***        END OF FILE                                                   ***/
 /****************************************************************************/
-

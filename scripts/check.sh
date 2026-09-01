@@ -8,16 +8,20 @@ sh -n scripts/build.sh
 
 HEADER=app/Source/ZigbeeNodeControlBridge/custom_diag.h
 DIAG=app/Source/ZigbeeNodeControlBridge/custom_diag.c
+APS_KEY_GUARD=app/Source/ZigbeeNodeControlBridge/zps_key_index_guard.c
 ZNC_CMDS=app/Source/ZigbeeNodeControlBridge/app_Znc_cmds.c
 GP_SOURCE=app/Source/ZigbeeNodeControlBridge/app_green_power.c
 SERIAL=app/Source/ZigbeeNodeControlBridge/SerialLink.h
+SERIAL_C=app/Source/ZigbeeNodeControlBridge/SerialLink.c
 MAKEFILE=app/Build/ZigbeeNodeControlBridge/Makefile
 START=app/Source/ZigbeeNodeControlBridge/app_start.c
 GENERAL_EVENTS=app/Source/ZigbeeNodeControlBridge/app_general_events_handler.c
+ZCL_EVENTS=app/Source/ZigbeeNodeControlBridge/app_zcl_event_handler.c
 OVERLAY=app/Source/ZigbeeNodeControlBridge/zcl_overlay/zigate_compat.c
 OVERLAY_H=app/Source/ZigbeeNodeControlBridge/zcl_overlay/zigate_compat.h
 CONTROL_BRIDGE=Components/ZCL/Devices/ZLO/Include/control_bridge.h
 ZPSCFG=app/Source/ZigbeeNodeControlBridge/ZigbeeNodeControlBridgeCoordinator_GP_Proxy.zpscfg
+ZPS_GEN=app/Source/ZigbeeNodeControlBridge/zps_gen.c
 OCB_EXP_H=app/Source/ZigbeeNodeControlBridge/ocb_experimental.h
 OCB_EXP_C=app/Source/ZigbeeNodeControlBridge/ocb_experimental.c
 AHI=app/Source/ZigbeeNodeControlBridge/app_ahi_commands.c
@@ -27,46 +31,67 @@ BDB_STATE=Components/BDB/Source/Common/bdb_state_machine.c
 README=README.md
 MIGRATION=docs/MIGRATION_STATUS.md
 OCB_DOC=docs/OCB_UART_ABI.md
+RESET_DOC=docs/RESET_DIAGNOSTIC_ABI.md
+ELF=app/Build/ZigbeeNodeControlBridge/ZigbeeNodeControlBridge_JN5169_GP_Proxy_COORDINATOR_115200.elf
+BA2_BIN=${TOOLCHAIN_ROOT:-$HOME/toolchains}/${TOOLCHAIN_PATH:-ba-elf-ba2}/bin
 
 # Coordinator TX power is an application-owned, versioned PDM setting. Keep
 # the native MiniMac validation set exact. Restoration is anchored to the
-# application-forwarded NWK_STARTED event, after BDB has consumed it, rather
-# than merely to AF init (the subsequent MLME start can reset PIB defaults).
-grep -Eq '^#define[[:space:]]+PDM_ID_APP_TX_POWER[[:space:]]+0x11$' "$PDM_IDS"
-if [ "$(grep -Ec '^#define[[:space:]]+PDM_ID_APP_[A-Z0-9_]+[[:space:]]+0x11$' "$PDM_IDS")" -ne 1 ]; then
-    echo "PDM application record 0x11 is not unique" >&2
+# application main loop after BDB work, rather than inside a stack/BDB
+# callback or at AF init. Restored-network boot also schedules the first
+# application before serial RX can observe the default PIB value.
+grep -Eq '^#define[[:space:]]+PDM_ID_APP_TX_POWER_V1_RESERVED[[:space:]]+0x11$' "$PDM_IDS"
+grep -Eq '^#define[[:space:]]+PDM_ID_APP_TX_POWER[[:space:]]+0x12$' "$PDM_IDS"
+if [ "$(grep -Ec '^#define[[:space:]]+PDM_ID_APP_[A-Z0-9_]+[[:space:]]+0x12$' "$PDM_IDS")" -ne 1 ]; then
+    echo "PDM application record 0x12 is not unique" >&2
     exit 1
 fi
-grep -Eq '^#define[[:space:]]+APP_TX_POWER_RECORD_VERSION[[:space:]]+\(1U\)$' "$AHI"
-grep -q 'sRecord.u8Check == u8APP_AHITxPowerRecordCheck(&sRecord)' "$AHI"
-grep -q 'u16BytesRead == sizeof(sRecord)' "$AHI"
+if grep -q 'PDM_ID_APP_TX_POWER_V1_RESERVED' "$AHI"; then
+    echo "legacy TX-power record 0x11 must remain abandoned" >&2
+    exit 1
+fi
+grep -Eq '^#define[[:space:]]+APP_TX_POWER_RECORD_VERSION[[:space:]]+\(2U\)$' "$AHI"
+grep -q '} PACK tsAPP_TxPowerRecord;' "$AHI"
+grep -q 'sizeof(tsAPP_TxPowerRecord) == 5U' "$AHI"
+grep -q 'psRecord->u8Check == u8APP_AHITxPowerRecordCheck(psRecord)' "$AHI"
+grep -q 'u16BytesRead == sizeof(\*psRecord)' "$AHI"
 grep -Eq 'u8TxPower <= 0x0A \|\|' "$AHI"
 grep -Eq 'u8TxPower >= 0x20 && u8TxPower <= 0x3F' "$AHI"
 grep -q 'PDM_eSaveRecordData(PDM_ID_APP_TX_POWER' "$AHI"
-grep -q 'APP_vAHIApplyPersistedTxPower' "$AHI_H"
+grep -q 'APP_vAHINotifyNetworkStarted' "$AHI_H"
+grep -q 'APP_vAHIServicePersistedTxPower' "$AHI_H"
 if grep -q 'TxPowerRestoreAttempted\|RestoreTxPowerOnce' "$AHI" "$AHI_H"; then
     echo "TX-power application must not be suppressed after the first network start" >&2
     exit 1
 fi
 grep -q 'if (!bAPP_AHIStoredTxPowerLoaded)' "$AHI"
 
-if grep -q 'APP_vAHIApplyPersistedTxPower' "$START"; then
-    echo "TX-power restore must not run at pre-MLME AF initialisation" >&2
+if grep -q 'APP_vAHIServicePersistedTxPower' "$GENERAL_EVENTS"; then
+    echo "TX-power restore must not run inside the forwarded stack-event callback" >&2
     exit 1
 fi
-NWK_STARTED=$(grep -n 'case ZPS_EVENT_NWK_STARTED:' "$GENERAL_EVENTS" | cut -d: -f1)
-TX_RESTORE=$(grep -n 'APP_vAHIApplyPersistedTxPower();' "$GENERAL_EVENTS" | cut -d: -f1)
-NEXT_STACK_CASE=$(grep -n 'case ZPS_EVENT_ERROR:' "$GENERAL_EVENTS" | cut -d: -f1)
-if [ -z "$NWK_STARTED" ] || [ -z "$TX_RESTORE" ] ||
-        [ -z "$NEXT_STACK_CASE" ] || [ "$TX_RESTORE" -le "$NWK_STARTED" ] ||
-        [ "$TX_RESTORE" -ge "$NEXT_STACK_CASE" ]; then
-    echo "TX-power restore is not anchored inside the NWK_STARTED event block" >&2
+grep -A12 'case BDB_EVENT_ZPSAF:' "$ZCL_EVENTS" \
+    | grep -q 'ZPS_EVENT_NWK_STARTED'
+grep -A8 'ZPS_EVENT_NWK_STARTED' "$ZCL_EVENTS" \
+    | grep -q 'APP_vAHINotifyNetworkStarted();'
+BDB_START=$(grep -n 'BDB_vStart();' "$START" | cut -d: -f1)
+BOOT_TX_NOTIFY=$(grep -n 'APP_vAHINotifyNetworkStarted();' "$START" | cut -d: -f1)
+MAIN_LOOP=$(grep -n 'APP_vMainLoop();' "$START" | cut -d: -f1)
+if [ -z "$BDB_START" ] || [ -z "$BOOT_TX_NOTIFY" ] || [ -z "$MAIN_LOOP" ] ||
+        [ "$BOOT_TX_NOTIFY" -le "$BDB_START" ] || [ "$BOOT_TX_NOTIFY" -ge "$MAIN_LOOP" ]; then
+    echo "restored-network boot does not schedule TX-power restore after BDB_vStart" >&2
     exit 1
 fi
-grep -B8 'APP_vAHIApplyPersistedTxPower();' "$GENERAL_EVENTS" \
-    | grep -q 'psStackEvent->eType == ZPS_EVENT_NWK_STARTED'
+BDB_TASK=$(grep -n 'bdb_taskBDB ( );' "$START" | cut -d: -f1)
+TX_SERVICE=$(grep -n 'APP_vAHIServicePersistedTxPower();' "$START" | cut -d: -f1)
+APP_EVENTS=$(grep -n 'APP_vHandleAppEvents ( );' "$START" | cut -d: -f1)
+if [ -z "$BDB_TASK" ] || [ -z "$TX_SERVICE" ] || [ -z "$APP_EVENTS" ] ||
+        [ "$TX_SERVICE" -le "$BDB_TASK" ] || [ "$TX_SERVICE" -ge "$APP_EVENTS" ]; then
+    echo "TX-power restore is not serviced after bdb_taskBDB in the main loop" >&2
+    exit 1
+fi
 if awk '
-    /PUBLIC void APP_vAHIApplyPersistedTxPower\(void\)/ { in_apply = 1 }
+    /PUBLIC void APP_vAHIServicePersistedTxPower\(void\)/ { in_apply = 1 }
     in_apply && /\/\*\*\*        Local Functions/ { exit }
     in_apply && /PDM_eSaveRecordData|bAPP_AHISaveTxPower/ { found = 1 }
     END { exit found ? 0 : 1 }
@@ -90,16 +115,17 @@ awk '
     exit 1
 }
 
-# One cached PDM load prevents recurring NWK_STARTED events and repeated SETs
-# from rereading flash. A valid equal record bypasses the save; invalid,
-# corrupt, or old records cannot set the valid-cache flag and are overwritten.
-if [ "$(grep -c 'PDM_eReadDataFromRecord(PDM_ID_APP_TX_POWER' "$AHI")" -ne 1 ]; then
-    echo "TX-power PDM record must have exactly one cached read site" >&2
+# One cached restore load prevents recurring NWK_STARTED events from rereading
+# flash. The second read site immediately verifies a successful SET-side save.
+if [ "$(grep -c 'PDM_eReadDataFromRecord(PDM_ID_APP_TX_POWER' "$AHI")" -ne 2 ]; then
+    echo "TX-power PDM must have one cached load and one save-verification read" >&2
     exit 1
 fi
 grep -A4 'bAPP_AHILoadStoredTxPower(&u8StoredTxPower)' "$AHI" \
     | grep -q 'u8StoredTxPower == u8TxPower'
 grep -A6 'u8StoredTxPower == u8TxPower' "$AHI" | grep -q 'return TRUE'
+grep -A9 'PDM_eSaveRecordData(PDM_ID_APP_TX_POWER' "$AHI" \
+    | grep -q 'PDM_eReadDataFromRecord(PDM_ID_APP_TX_POWER'
 
 # SET must read the old PIB before the short-circuited SET expression so every
 # post-mutation failure has a rollback value.
@@ -128,6 +154,14 @@ for line in $RAW_PDM_CASES; do
         exit 1
     }
 done
+
+EXPECTED_EP1_OUTPUT='PRIVATE const uint16 s_au16Endpoint1OutputClusterList[25] = { 0x0000, 0x0001, 0x0012, 0x0019, 0x0300, 0x0004, 0x0003, 0x0008, 0x0006, 0x0005, 0x0101, 0x0702, 0x0500, 0x0201, 0x0204, 0x0400, 0x0401, 0x0403, 0x0406, 0x0405, 0x0402, 0x0b04, 0x0b05, 0x0102, 0x0502, };'
+grep -Fqx "$EXPECTED_EP1_OUTPUT" "$ZPS_GEN"
+grep -A12 '^[[:space:]]*0x0104,$' "$ZPS_GEN" \
+    | grep -A8 '^[[:space:]]*1,$' \
+    | grep -q '^[[:space:]]*25,$'
+grep -A12 '^[[:space:]]*0x0104,$' "$ZPS_GEN" \
+    | grep -q '^[[:space:]]*s_au16Endpoint1OutputClusterList,$'
 
 # Prove the build-system invariant itself, rather than only grepping its text.
 if make -s -C app/Build/ZigbeeNodeControlBridge \
@@ -179,8 +213,8 @@ grep -q 'vExpWipe(&uFlashKey' "$OCB_EXP_C"
 grep -q 'OCB_TYPED_SUPPORT=1' "$README"
 grep -q 'OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=0' "$README"
 grep -q 'INSECURE_DEV_RAW_PDM=0' "$README"
-grep -qi '0x000000000000c60f' "$OCB_DOC"
-grep -qi 'DIAG_FW_BUILD_ID=0x0101c525' "$OCB_DOC"
+grep -qi '0x00000000000cc60f' "$OCB_DOC"
+grep -qi 'DIAG_FW_BUILD_ID=0x010dc53d' "$OCB_DOC"
 grep -q 'Reserved diagnostic bit 17' "$OCB_DOC"
 grep -q 'status `5 RESTORE_UNSUPPORTED`' "$OCB_DOC"
 for opcode in 18 19 1A 1B 1C 20 21 22 23 24 25 26 27 28 29 2A
@@ -193,9 +227,19 @@ done
 grep -q 'PDM_ID_APP_TX_POWER' "$MIGRATION"
 grep -q 'native signed six-bit MiniMac codes' "$README"
 grep -q 'native signed six-bit MiniMac codes' "$MIGRATION"
-grep -q 'f17777bec16acd8f1586e56d5a3695f12c381603f634fee15f26859d7d1be6e0' "$README"
-grep -q 'f17777bec16acd8f1586e56d5a3695f12c381603f634fee15f26859d7d1be6e0' "$MIGRATION"
-grep -q '244-byte linker' "$OCB_DOC"
+grep -q 'a704ba590c4a03e55be889d01c83b77c3491a09b708a8bca507b1829631b026e' "$README"
+grep -q 'a704ba590c4a03e55be889d01c83b77c3491a09b708a8bca507b1829631b026e' "$MIGRATION"
+grep -q 'a510aaba81c320a26a7de76428e7231fc91466bddd990087c104c157a41ce96b' "$README"
+grep -q 'a510aaba81c320a26a7de76428e7231fc91466bddd990087c104c157a41ce96b' "$MIGRATION"
+grep -q '5aeeaf1b91139bbae29f8f452db8f70fe921315cc378176610ec2027ecca6ab4' "$README"
+grep -q '5aeeaf1b91139bbae29f8f452db8f70fe921315cc378176610ec2027ecca6ab4' "$MIGRATION"
+grep -q 'f052390fa76e520fbcc51866d3e11c9cee60f33d9f80c31dd7358c751ccbf073' "$README"
+grep -q 'f052390fa76e520fbcc51866d3e11c9cee60f33d9f80c31dd7358c751ccbf073' "$MIGRATION"
+grep -q '4910a67aaeeb10fef7a5ad4e79065eeb2a1f3bc54677b342b94731ac525424fd' "$README"
+grep -q '4910a67aaeeb10fef7a5ad4e79065eeb2a1f3bc54677b342b94731ac525424fd' "$MIGRATION"
+grep -q '025e033cb73f8e68c57d41263c7b557888c49afa774c695aacce18dd053eecb4' "$README"
+grep -q '025e033cb73f8e68c57d41263c7b557888c49afa774c695aacce18dd053eecb4' "$MIGRATION"
+grep -q '196-byte linker' "$OCB_DOC"
 
 # Exact generated v2395 legacy assumptions used for default-TC incoming
 # counter indexing and table enumeration.
@@ -230,12 +274,45 @@ fi
 
 grep -Eq '#define[[:space:]]+DIAG_PROTO_MAJOR[[:space:]]+\(1U\)' "$HEADER"
 grep -Eq '#define[[:space:]]+DIAG_PROTO_MINOR[[:space:]]+\(2U\)' "$HEADER"
-grep -Eq '#define[[:space:]]+DIAG_BUILD_REVISION[[:space:]]+\(9U\)' "$HEADER"
+grep -Eq '#define[[:space:]]+DIAG_BUILD_REVISION[[:space:]]+\(17U\)' "$HEADER"
 grep -Eq '#define[[:space:]]+DIAG_CAP_BIT_GP_COMMISSIONING[[:space:]]+\(\(\(uint64\)1U\)[[:space:]]*<<[[:space:]]*3\)' "$HEADER"
+grep -Eq '#define[[:space:]]+DIAG_CAP_BIT_RESET_DIAGNOSTICS[[:space:]]+\(\(\(uint64\)1U\)[[:space:]]*<<[[:space:]]*18\)' "$HEADER"
+grep -Eq '#define[[:space:]]+DIAG_CAP_BIT_RESET_CONTEXT[[:space:]]+\(\(\(uint64\)1U\)[[:space:]]*<<[[:space:]]*19\)' "$HEADER"
+grep -q '| DIAG_CAP_BIT_RESET_DIAGNOSTICS' "$HEADER"
+grep -q '| DIAG_CAP_BIT_RESET_CONTEXT' "$HEADER"
 grep -Eq 'E_SL_MSG_MANUFACTURER_CODE_REQ[[:space:]]*=[[:space:]]*0x0D16' "$SERIAL"
 grep -Eq 'E_SL_MSG_MANUFACTURER_CODE_RSP[[:space:]]*=[[:space:]]*0x8D16' "$SERIAL"
 grep -Eq 'E_SL_MSG_GP_COMMISSION_REQ[[:space:]]*=[[:space:]]*0x0D17' "$SERIAL"
 grep -Eq 'E_SL_MSG_GP_COMMISSION_RSP[[:space:]]*=[[:space:]]*0x8D17' "$SERIAL"
+grep -Eq 'E_SL_MSG_RESET_DIAG_REQ[[:space:]]*=[[:space:]]*0x0D2B' "$SERIAL"
+grep -Eq 'E_SL_MSG_RESET_DIAG_RSP[[:space:]]*=[[:space:]]*0x8D2B' "$SERIAL"
+grep -Eq 'E_SL_MSG_RESET_CONTEXT_REQ[[:space:]]*=[[:space:]]*0x0D2C' "$SERIAL"
+grep -Eq 'E_SL_MSG_RESET_CONTEXT_RSP[[:space:]]*=[[:space:]]*0x8D2C' "$SERIAL"
+grep -q 'CUSTOMDIAG_vHandleResetDiag' "$DIAG"
+grep -q 'CUSTOMDIAG_vHandleResetDiag' "$ZNC_CMDS"
+grep -q 'CUSTOMDIAG_vHandleResetContext' "$DIAG"
+grep -q 'CUSTOMDIAG_vHandleResetContext' "$ZNC_CMDS"
+grep -Eq '^#define[[:space:]]+DIAG_RESET_DIAG_RSP_LEN[[:space:]]+\(6U\)' "$HEADER"
+grep -Eq '^#define[[:space:]]+DIAG_RESET_CONTEXT_RSP_LEN[[:space:]]+\(22U\)' "$HEADER"
+grep -q 'require bit 18 before sending `0x0D2B`' "$RESET_DOC"
+grep -q 'independently require bit 19' "$RESET_DOC"
+grep -q 's_u16BootPowerStatus = u16AHI_PowerStatus();' "$DIAG"
+grep -q 'bAHI_WatchdogResetEvent()' "$DIAG"
+grep -q 'bAHI_BrownOutEventResetStatus()' "$DIAG"
+grep -q 'section(".noinit")' "$DIAG"
+grep -q 's_u8BootResetReason' "$DIAG"
+grep -q '.noinit ALIGN (0x04) (NOLOAD)' Chip/JN5169/Build/AppBuildEnd.ld
+grep -q 'DIAG_RESET_REASON_STACK_OVERFLOW' "$START"
+grep -q 'CUSTOMDIAG_vRetainExceptionContext' "$START"
+grep -q 'l.mfspr %0,r0,0x0020' "$START"
+grep -q 'l.mfspr %0,r0,0x0030' "$START"
+if grep -q 'while ( ( uint32 ) pu32Stack & 0x7fff )' "$START"; then
+    echo "exception handler still dereferences a post-fault stack walk" >&2
+    exit 1
+fi
+grep -q 'CUSTOMDIAG_vRetainResetReason(u8ResetReason);' "$ZNC_CMDS"
+grep -q 'CUSTOMDIAG_vCaptureResetCause();' "$START"
+grep -q 'RESET_DIAGNOSTIC_ABI.md' "$README"
 
 # The Green Power capability bit and its handler share one compile switch, so
 # no build can advertise 1<<3 without implementing 0x0D17.
@@ -259,9 +336,101 @@ grep -Eq 'u8Action[[:space:]]*=[[:space:]]*pu8Rx\[5\];' "$DIAG"
 grep -Eq 'u8Timeout[[:space:]]*=[[:space:]]*pu8Rx\[6\];' "$DIAG"
 grep -Eq 'ZNC_BUF_U32_UPD[[:space:]]*\([[:space:]]*&s_au8DiagTx\[[[:space:]]*u8Length[[:space:]]*\],[[:space:]]*u32TransactionId,' "$DIAG"
 
-# The 0x8000 status frame serialises 8 payload bytes and vSL_WriteMessage()
-# writes the link-quality byte at pu8Data[8], so the local buffer must be 9.
-grep -Eq 'uint8 au8Status\[9\];' "$DIAG"
+# SerialLink TX treats the payload as immutable and streams a virtual trailing
+# LQI through both checksum and escaping. Exact-size scalar and 8-byte status
+# callers therefore need no hidden byte of writable storage.
+grep -Eq 'PUBLIC void vSL_WriteMessage\(uint16 u16Type,' "$SERIAL_C"
+grep -Eq 'const uint8 \*pu8Data' "$SERIAL_C"
+grep -q 'u8SL_CalculateCRCWithLqi' "$SERIAL_C"
+grep -Eq 'vSL_TxByte\(FALSE,[[:space:]]*u8LinkQuality\);' "$SERIAL_C"
+if grep -Eq 'pu8Data\[[^]]+\][[:space:]]*=' "$SERIAL_C"; then
+    echo "vSL_WriteMessage still mutates caller payload" >&2
+    exit 1
+fi
+grep -Eq 'uint8 au8Status\[8\];' "$DIAG"
+if grep -q 'LQI_RESERVE' "$HEADER" "$DIAG" "$OCB_EXP_C"; then
+    echo "obsolete caller-side LQI reserve remains" >&2
+    exit 1
+fi
+
+# Golden framing equivalence for the default XOR checksum and optional CCITT
+# checksum. The first vector exercises escaping in payload and LQI; the second
+# is an exact-size scalar caller. Both models must produce the historical wire
+# bytes while leaving the supplied bytearray unchanged.
+python3 -c '
+def esc(value):
+    return bytes((2, value ^ 0x10)) if value < 0x10 else bytes((value,))
+
+def crc8_update(crc, value):
+    crc ^= value
+    for _ in range(8):
+        crc = (((crc << 1) ^ 0x07) & 0xff) if crc & 0x80 else ((crc << 1) & 0xff)
+    return crc
+
+def frame_legacy(msg_type, payload, lqi, ccitt):
+    data = bytes(payload) + bytes((lqi,))
+    length = len(data)
+    crc_input = (msg_type & 0xff, msg_type >> 8, length & 0xff, length >> 8) + tuple(data)
+    crc = 0
+    for value in crc_input:
+        crc = crc8_update(crc, value) if ccitt else crc ^ value
+    body = (msg_type >> 8, msg_type & 0xff, length >> 8, length & 0xff, crc) + tuple(data)
+    return bytes((1,)) + b"".join(esc(value) for value in body) + bytes((3,))
+
+def frame_streamed(msg_type, payload, lqi, ccitt):
+    before = bytes(payload)
+    length = len(payload) + 1
+    crc_input = (msg_type & 0xff, msg_type >> 8, length & 0xff, length >> 8)
+    crc = 0
+    for value in crc_input + tuple(payload) + (lqi,):
+        crc = crc8_update(crc, value) if ccitt else crc ^ value
+    body = (msg_type >> 8, msg_type & 0xff, length >> 8, length & 0xff, crc)
+    wire = bytes((1,)) + b"".join(esc(value) for value in body)
+    wire += b"".join(esc(value) for value in payload)
+    wire += esc(lqi) + bytes((3,))
+    assert bytes(payload) == before
+    return wire
+
+vectors = (
+    (0x8002, bytearray((0, 1, 2, 3, 0x10)), 0x02,
+     "018002120210021696021002110212021310021203",
+     "018002120210021624021002110212021310021203"),
+    (0x807a, bytearray((1,)), 0,
+     "01807a02100212f90211021003",
+     "01807a02100212600211021003"),
+)
+for msg_type, payload, lqi, xor_golden, ccitt_golden in vectors:
+    for ccitt, golden in ((False, xor_golden), (True, ccitt_golden)):
+        old = frame_legacy(msg_type, payload, lqi, ccitt)
+        new = frame_streamed(msg_type, payload, lqi, ccitt)
+        assert old == new == bytes.fromhex(golden)
+'
+
+# RAW_MODE_ON endpoint-0 traffic must branch before the stock ZDP unpacker.
+# Valid Device_annce remains the sole typed exception for stock 0x004D.
+awk '
+    /u8RawMode == RAW_MODE_ON &&/ && !raw_guard { raw_guard = NR }
+    /zps_bAplZdpUnpackResponse/ && !unpack       { unpack = NR }
+    END { if (!raw_guard || !unpack || raw_guard >= unpack) exit 1 }
+' "$GENERAL_EVENTS" || {
+    echo "raw endpoint-0 guard does not precede ZDP unpacking" >&2
+    exit 1
+}
+grep -q 'APP_ZDP_DEVICE_ANNCE_PAYLOAD_LEN' "$GENERAL_EVENTS"
+grep -A16 'u8RawMode == RAW_MODE_ON &&' "$GENERAL_EVENTS" \
+    | grep -q 'PDUM_eAPduFreeAPduInstance'
+grep -A18 'u8RawMode == RAW_MODE_ON &&' "$GENERAL_EVENTS" \
+    | grep -q 'return;'
+
+# Malformed 0x0530 requests are rejected before APP_eApsProfileDataRequest can
+# allocate/copy an APDU. Length subtraction occurs only after the fixed header
+# has been proven present.
+grep -q 'APP_RAW_APS_SHORT_HEADER_LEN' "$ZNC_CMDS"
+grep -q 'APP_RAW_APS_IEEE_HEADER_LEN' "$ZNC_CMDS"
+grep -A55 'case (E_SL_MSG_SEND_RAW_APS_DATA_PACKET):' "$ZNC_CMDS" \
+    | grep -q 'u16PacketLength < u16HeaderLength'
+grep -A60 'case (E_SL_MSG_SEND_RAW_APS_DATA_PACKET):' "$ZNC_CMDS" \
+    | grep -q 'u16PacketLength - u16HeaderLength'
 
 # The capability bitmap must never be derived straight from CLD_GREENPOWER
 # again (rev5 did that while no handler existed at all).
@@ -294,12 +463,11 @@ printf '%s\n' "$EP1_CLUSTERS" | grep -Eq '<InputClusters Cluster="Time"[[:space:
 printf '%s\n' "$EP1_CLUSTERS" | grep -Eq '<OutputClusters Cluster="Window_Covering"[[:space:]].*Discoverable="true"'
 printf '%s\n' "$EP1_CLUSTERS" | grep -Eq '<OutputClusters Cluster="IAS_Warning_Device"[[:space:]].*Discoverable="true"'
 
-# rev9 raw-NCP transmit allowlist. ZPS treats the endpoint-1 OutputClusters
-# list as the allowlist for host-originated raw APS transmissions (0x0530):
-# a missing entry is rejected locally with APS 0xA3 ILLEGAL_REQUEST, which is
-# how rev6/rev8 HIL failed Power Configuration reads and configure-reporting
-# while Basic reads succeeded. These entries are const/flash descriptor data
-# and must NOT be paired with new ZCL runtime instances.
+# Endpoint-1 output descriptor advertised by the NCP. rev17 disassembly proved
+# that raw 0x0530 unicast validates the source endpoint but does not search
+# this list; keep it complete for descriptor truth and interoperability, not
+# as an explanation for every APS 0xA3. These entries are const/flash
+# descriptor data and must NOT be paired with new ZCL runtime instances.
 #
 # The membership test is anchored through the closing quote of the Cluster
 # attribute, so a longer cluster name that merely has a required name as its
@@ -338,7 +506,7 @@ do
     fi
 done
 
-# The raw allowlist must stay descriptor-only: exactly three ZCL client/server
+# The output declarations must stay descriptor-only: exactly three ZCL client/server
 # instances are created by the overlay (Time server, Window Covering client,
 # IAS WD client) for firmware-side eZCL_CustomCommandSend paths.
 if [ "$(grep -c 'eCLD_[A-Za-z]*Create[A-Za-z]*(' "$OVERLAY")" -ne 3 ]; then
@@ -487,9 +655,42 @@ if find app -type f \( -name 'tclk_diagnostic.c' -o -name 'tclk_diagnostic.h' \)
     exit 1
 fi
 
-if grep -Eq -- '--wrap[=,[:space:]]' "$MAKEFILE"; then
-    echo "security-sensitive linker interposition is enabled" >&2
+grep -Eq '^override LDFLAGS \+= -Wl,--wrap=zps_psFindKeyDescr$' "$MAKEFILE"
+grep -Eq '^DISABLE_LTO \?= 1$' "$MAKEFILE"
+grep -q 'zps_psFindKeyDescr guard requires DISABLE_LTO=1' "$MAKEFILE"
+grep -Eq '^APPSRC \+= zps_key_index_guard\.c$' "$MAKEFILE"
+grep -q '__real_zps_psFindKeyDescr(pvApl, u64DeviceAddr, pu32Index)' "$APS_KEY_GUARD"
+grep -q 'if (psKey == NULL && pu32Index != NULL)' "$APS_KEY_GUARD"
+grep -q '\*pu32Index = 0U;' "$APS_KEY_GUARD"
+grep -q 'return psKey;' "$APS_KEY_GUARD"
+if grep -Eq '(^|[^_[:alnum:]])zps_psFindKeyDescr[[:space:]]*\(' "$APS_KEY_GUARD"; then
+    echo "APS key-index guard calls the wrapped name directly" >&2
     exit 1
+fi
+GUARD_IF=$(grep -n 'if (psKey == NULL && pu32Index != NULL)' "$APS_KEY_GUARD" | cut -d: -f1)
+GUARD_STORE=$(grep -n '\*pu32Index = 0U;' "$APS_KEY_GUARD" | cut -d: -f1)
+GUARD_RETURN=$(grep -n 'return psKey;' "$APS_KEY_GUARD" | cut -d: -f1)
+if [ -z "$GUARD_IF" ] || [ -z "$GUARD_STORE" ] || [ -z "$GUARD_RETURN" ] ||
+        [ "$GUARD_STORE" -le "$GUARD_IF" ] || [ "$GUARD_STORE" -ge "$GUARD_RETURN" ]; then
+    echo "APS key-index store is not contained in the NULL-result guard" >&2
+    exit 1
+fi
+if [ "$(grep -Ec -- '--wrap([=,]|[[:space:]])' "$MAKEFILE")" -ne 1 ]; then
+    echo "unapproved linker interposition is enabled" >&2
+    exit 1
+fi
+if [ -f "$ELF" ]; then
+    if [ ! -x "$BA2_BIN/ba-elf-nm" ] || [ ! -x "$BA2_BIN/ba-elf-objdump" ]; then
+        echo "built ELF exists but BA2 inspection tools are unavailable" >&2
+        exit 1
+    fi
+    "$BA2_BIN/ba-elf-nm" "$ELF" | grep -q ' T __wrap_zps_psFindKeyDescr$'
+    "$BA2_BIN/ba-elf-nm" "$ELF" | grep -q ' T zps_psFindKeyDescr$'
+    "$BA2_BIN/ba-elf-nm" -S "$ELF" \
+        | grep -Eq '^[0-9a-fA-F]+[[:space:]]+00000032[[:space:]]+r[[:space:]]+s_au16Endpoint1OutputClusterList$'
+    "$BA2_BIN/ba-elf-objdump" -d "$ELF" \
+        | grep -A220 '<bDuplicateCheck>:' \
+        | grep -q '<__wrap_zps_psFindKeyDescr>'
 fi
 
 if grep -Eq '^[[:space:]]*APP_MigratePDM[[:space:]]*\(' "$START"; then

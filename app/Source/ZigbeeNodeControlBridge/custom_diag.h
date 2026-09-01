@@ -22,14 +22,14 @@
  *     - Node Descriptor manufacturer code (0x0D16 / 0x8D16)
  *     - Local GP proxy commissioning     (0x0D17 / 0x8D17)
  *     - Typed OCB metadata export        (0x0D18..0x0D1C)
+ *     - Boot reset-cause snapshot        (0x0D2B / 0x8D2B)
  *
  *   All wire fields are serialised individually in big-endian order using the
  *   ZNC_BUF_* macros. No C structure is ever cast onto the wire, so the wire
  *   ABI is independent of BA GCC 4.7.4 struct layout.
  *
- *   IMPORTANT: vSL_WriteMessage() always appends one link-quality byte to the
- *   caller supplied buffer beyond the declared payload length. Every response
- *   buffer therefore reserves one extra writable byte (DIAG_TX_LQI_RESERVE).
+ *   vSL_WriteMessage() streams the trailing link-quality byte without changing
+ *   or extending the caller-supplied payload.
  *
  ****************************************************************************/
 
@@ -159,15 +159,52 @@
  *          NOT_AUTHORIZED before the attribute is modified, in raw mode too.
  *          Host SET/GET (0x0016/0x0017) and the 1 Hz increment are unchanged;
  *          this touches no host wire encoding, no capability bit and no
- *          protocol field, so it did not warrant a rev10 - and rev9 was never
- *          flashed or published, so it was folded in place exactly as the
- *          superseded rev8 draft was.
+ *          protocol field, so it was folded into rev9 before publication,
+ *          exactly as the superseded rev8 draft was.
+ *   rev 10: repair TX-power restoration after physical HIL of published rev9
+ *           showed that a successful persisted SET reverted to the default
+ *           PIB value after adapter restart. NWK_STARTED is now observed in
+ *           APP_vBdbCallback before endpoint routing, and application is
+ *           deferred until bdb_taskBDB() has returned to the main loop.
+ *           Successful PDM saves are also read back and fully validated before
+ *           SET reports success. No UART command encoding or capability bit
+ *           changes.
+ *   rev 11: move the packed five-byte TX-power v2 record from PDM ID 0x0011
+ *           to 0x0012. Physical HIL showed that EEPROM PDM would not replace
+ *           rev9's existing ABI-padded eight-byte v1 record at the same ID;
+ *           SET therefore failed closed. ID 0x0011 is permanently reserved
+ *           and ignored. No UART command encoding or capability bit changes.
+ *   rev 12: bypass the stock typed ZDP unpacker for raw-mode endpoint-0
+ *           traffic except valid Device_annce, make SerialLink TX payloads
+ *           immutable, reject malformed 0x0530 requests before APDU
+ *           allocation, and add capability-gated boot reset diagnostics at
+ *           0x0D2B/0x8D2B. Existing command layouts and protocol 1.2 remain
+ *           unchanged.
+ *   rev 13: schedule the persisted TX-power restore immediately after
+ *           BDB_vStart() on restored-network boot, so the first serial GET
+ *           cannot observe the default PIB value while NWK_STARTED is still
+ *           queued. The later NWK_STARTED restore remains in place.
+ *   rev 14: retain a checksum-guarded reset reason across software reset in
+ *           a NOLOAD SRAM section. The existing 0x0D2B byte 5 now identifies
+ *           synchronous exceptions and requested software resets instead of
+ *           always returning unavailable. No PDM write or wire-size change.
+ *   rev 15: extend the guarded reset marker with EPCR, EEAR, exception SP and
+ *           interrupted LR. Add exact-length 0x0D2C/0x8D2C reset-context
+ *           diagnostics; 0x8D2B remains six bytes.
+ *   rev 16: advertise 0x0D2C/0x8D2C under independent capability bit 19.
+ *           Bit 18 retains its shipped rev12 contract for 0x0D2B only. No
+ *           request or response payload layout changes.
+ *   rev 17: define the APS key-table output index when the v2395 key lookup
+ *           returns no descriptor. The stock bDuplicateCheck() otherwise
+ *           consumes the stale CRC stack slot as an incoming-frame-counter
+ *           array index and raises a bus error. Key matching and replay
+ *           decisions are unchanged; no wire layout or capability changes.
  *
- *   The additive OCB metadata-export subset remains protocol 1.2 / rev9 for
+ *   The additive OCB metadata-export subset remains protocol 1.2 / rev17 for
  *   stock compatibility. Its separately negotiated capability bit changes
  *   DIAG_FW_BUILD_ID, so hosts can distinguish this image without changing
  *   any previously shipped command layout. */
-#define DIAG_BUILD_REVISION             (9U)
+#define DIAG_BUILD_REVISION             (17U)
 
 /* Per-request structure version accepted by every request handler. */
 #define DIAG_REQ_VERSION                (1U)
@@ -199,6 +236,8 @@
 /* Reserved production-qualified BackupCapable bit. It MUST remain clear until
  * complete restore and HIL qualification exist. */
 #define DIAG_CAP_BIT_OCB_BACKUP_QUALIFIED (((uint64)1U) << 17)
+#define DIAG_CAP_BIT_RESET_DIAGNOSTICS  (((uint64)1U) << 18)
+#define DIAG_CAP_BIT_RESET_CONTEXT      (((uint64)1U) << 19)
 
 /* Green Power proxy commissioning (0x0D17/0x8D17) is built only when the GP
  * cluster itself is compiled in. DIAG_HAVE_GP_COMMISSIONING is the single
@@ -237,7 +276,9 @@
                                         | DIAG_CAP_BIT_MANUFCODE    \
                                         | DIAG_CAP_BIT_DIAGNOSTICS  \
                                         | DIAG_CAP_OCB_BITMAP       \
-                                        | DIAG_CAP_OCB_EXPERIMENTAL_BITMAP )
+                                        | DIAG_CAP_OCB_EXPERIMENTAL_BITMAP \
+                                        | DIAG_CAP_BIT_RESET_DIAGNOSTICS \
+                                        | DIAG_CAP_BIT_RESET_CONTEXT )
 
 /* 32-bit fold of the 64-bit capability bitmap. */
 #define DIAG_CAP_FOLD32 \
@@ -261,16 +302,13 @@
 /***        Buffer sizing                                                 ***/
 /****************************************************************************/
 
-/* Maximum application payload (excluding the appended LQI byte) that any
+/* Maximum application payload (excluding the streamed LQI byte) that any
  * custom response will emit. Advertised to hosts as the max unescaped
  * application payload. Chosen to sit comfortably below MAX_PACKET_SIZE (270)
  * once ZiGate framing/escaping overhead is accounted for. */
 #define DIAG_TX_PAYLOAD_MAX             (200U)
 
-/* vSL_WriteMessage() appends exactly one LQI byte past the payload. */
-#define DIAG_TX_LQI_RESERVE             (1U)
-
-#define DIAG_TX_BUFFER_SIZE             (DIAG_TX_PAYLOAD_MAX + DIAG_TX_LQI_RESERVE)
+#define DIAG_TX_BUFFER_SIZE             (DIAG_TX_PAYLOAD_MAX)
 
 /****************************************************************************/
 /***        Fixed request / response wire lengths                         ***/
@@ -333,6 +371,27 @@
 
 /* General diagnostics response flags. */
 #define DIAG_GENDIAG_FLAG_TCLK_UNAVAILABLE  (0x01U)
+
+/* Additive boot reset-cause snapshot (0x0D2B / 0x8D2B).
+ * Request is empty. Response:
+ *   version[1] status[1] reset_flags[1] sysctrl_status[2] exception_reason[1]
+ * The reset status is captured once at the start of vAppMain. */
+#define DIAG_RESET_DIAG_RSP_LEN         (6U)
+#define DIAG_RESET_FLAG_WATCHDOG        (0x01U)
+#define DIAG_RESET_FLAG_BROWNOUT        (0x02U)
+#define DIAG_RESET_EXCEPTION_UNAVAILABLE (0xFFU)
+#define DIAG_RESET_REASON_NONE          (0x00U)
+#define DIAG_RESET_REASON_BUS_ERROR     (0x01U)
+#define DIAG_RESET_REASON_ALIGNMENT     (0x02U)
+#define DIAG_RESET_REASON_ILLEGAL_INSTRUCTION (0x03U)
+#define DIAG_RESET_REASON_STACK_OVERFLOW (0x04U)
+#define DIAG_RESET_REASON_UNCLAIMED_EXCEPTION (0x05U)
+#define DIAG_RESET_REASON_HOST_RESET    (0x10U)
+#define DIAG_RESET_REASON_ERASE_PDM     (0x11U)
+#define DIAG_RESET_REASON_FACTORY_RESET (0x12U)
+#define DIAG_RESET_REASON_RAW_PDM_RESET (0x13U)
+#define DIAG_RESET_CONTEXT_RSP_LEN      (22U)
+#define DIAG_RESET_CONTEXT_UNAVAILABLE  (0xFFFFFFFFUL)
 
 /* Manufacturer-code override (0x0D16/0x8D16). Request: version op code[2].
  * Response: version status effective[2] default[2]. All big-endian; the LQI
@@ -510,6 +569,8 @@ DIAG_STATIC_ASSERT(
     DIAG_PAGE_PREFIX_LEN + (DIAG_GROUP_LIST_MAX_RECORDS * DIAG_GROUP_LIST_ROW_MAX_LEN)
         <= DIAG_TX_PAYLOAD_MAX, group_list_page_fits);
 DIAG_STATIC_ASSERT(DIAG_CAP_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, cap_fits);
+DIAG_STATIC_ASSERT(DIAG_RESET_DIAG_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, reset_diag_fits);
+DIAG_STATIC_ASSERT(DIAG_RESET_CONTEXT_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, reset_context_fits);
 DIAG_STATIC_ASSERT(DIAG_GROUP_OP_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, group_op_fits);
 DIAG_STATIC_ASSERT(DIAG_MANUF_CODE_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, manuf_rsp_fits);
 DIAG_STATIC_ASSERT(DIAG_GP_COMMISSION_RSP_LEN <= DIAG_TX_PAYLOAD_MAX, gp_rsp_fits);
@@ -533,6 +594,16 @@ DIAG_STATIC_ASSERT(DIAG_GROUP_LIST_MAX_ENDPOINTS <= 242U, group_ep_cap);
  * payload (au8LinkRxBuffer); u16Len is the received payload length. */
 PUBLIC void CUSTOMDIAG_vHandleCapability(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleGeneralDiag(uint16 u16Len);
+PUBLIC void CUSTOMDIAG_vCaptureResetCause(void);
+PUBLIC void CUSTOMDIAG_vHandleResetDiag(uint16 u16Len);
+PUBLIC void CUSTOMDIAG_vHandleResetContext(uint16 u16Len);
+PUBLIC void CUSTOMDIAG_vRetainResetReason(uint8 u8Reason);
+PUBLIC void CUSTOMDIAG_vRetainExceptionContext(
+        uint8 u8Reason,
+        uint32 u32Epcr,
+        uint32 u32Eear,
+        uint32 u32Sp,
+        uint32 u32Lr);
 PUBLIC void CUSTOMDIAG_vHandleNeighbours(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleRoutes(uint16 u16Len, const uint8 *pu8Rx);
 PUBLIC void CUSTOMDIAG_vHandleGroupOp(uint16 u16Len, const uint8 *pu8Rx);

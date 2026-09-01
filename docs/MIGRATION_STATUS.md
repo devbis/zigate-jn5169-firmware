@@ -12,23 +12,25 @@ OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL=0
 
 Build entry point: `scripts/build.sh {clean|all}` (see header for overrides).
 
-**Publication-candidate status:** static/source invariants pass, and the
-current tree has completed a clean wrapper-default build with the pinned BA2
-toolchain. The current artifact measurements are recorded below. They are
-build evidence only: no image was flashed or hardware-qualified. Older hashes
-and map figures are explicitly labelled historical pre-TX-persistence evidence
-and must not be advertised as builds of the current source.
+**Publication-candidate status:** static/source invariants pass, two clean
+wrapper-default builds with the pinned BA2 toolchain are reproducible, and the
+exact rev17 BIN below has passed targeted JN5169 HIL for retained network/TX
+power and the RODRET reset defect. This does not qualify optional OCB restore
+or experimental key export. Older hashes and map figures are explicitly
+labelled historical evidence and must not be advertised as current builds.
 
 The current wrapper-default constants are diagnostic protocol 1.2, build
-revision 9, capability bitmap `0x000000000000C60F`, and
-`DIAG_FW_BUILD_ID=0x0101C525`. The default-off experimental key-export build
-adds bit 16, producing bitmap `0x000000000001C60F` and build ID
-`0x0100C525`. Reserved BackupCapable bit 17 remains clear in every build.
+revision 17, capability bitmap `0x00000000000CC60F`, and
+`DIAG_FW_BUILD_ID=0x010DC53D`. The default-off experimental key-export build
+adds bit 16, producing bitmap `0x00000000000DC60F` and build ID
+`0x010CC53D`. Reserved BackupCapable bit 17 remains clear in every build;
+reset-summary capability bit 18 and reset-context capability bit 19 are set.
 
 Current added/changed UART surfaces are:
 
 - custom diagnostics/control `0x0D0F/0x8D0F`,
-  `0x0D12/0x8D12`…`0x0D1C/0x8D1C`, and `0x0D1F/0x8D1F`;
+  `0x0D12/0x8D12`…`0x0D1C/0x8D1C`, `0x0D1F/0x8D1F`, and the additive
+  reset snapshot `0x0D2B/0x8D2B`;
 - removed/reserved TCLK request `0x0D00`, which emits only outer `0x8000`
   UNHANDLED_COMMAND and never `0x8D00`;
 - default-off experimental `0x0D20/0x8D20`…`0x0D2A/0x8D2A`, with
@@ -43,7 +45,7 @@ Current added/changed UART surfaces are:
 Exact payload lengths and OCB status/capability domains are enumerated in
 `README.md` and `docs/OCB_UART_ABI.md`.
 
-Current clean pinned-BA2 wrapper-default build:
+Published rev9/db6f8f2 pinned-BA2 wrapper-default build:
 
 ```
 text=255592  data=2104  bss=30421
@@ -54,9 +56,149 @@ bin sha256 f17777bec16acd8f1586e56d5a3695f12c381603f634fee15f26859d7d1be6e0
 elf sha256 23d25e6b6968f2bcfa56393770e6184e9904d6ea6557e73484f8ae826ed378e1
 ```
 
-An initial build and a subsequent clean regeneration produced the same
-hashes. This confirms the local build result, not cross-host reproducibility,
-flash approval, PDM capacity under wear, or hardware behavior.
+An initial build and a subsequent clean regeneration produced the same hashes.
+Physical HIL subsequently disproved the documented TX persistence: after SET 7
+and exact GET 7, an adapter restart preserved network identity but GET returned
+the default code 8. The hash above must not be presented as persistence
+qualification. Rev10 replaces its callback-ordering assumption and requires a
+new build and HIL result.
+
+Rev10 clean pinned-BA2 wrapper-default build:
+
+```
+text=255696  data=2104  bss=30421
+_minimum_heap_end=0x0400679c
+_stack_low_water_mark=0x04006890
+linker RAM margin=244 bytes
+bin sha256 08224db07767e3409d6ea06c6cd8adf8774a9e861292fda0d350e930aae94f74
+elf sha256 e1f67c5e721f2f190e833af15f1d3ab69c07d427a4fb8923a8dccdd5589f930e
+```
+
+Two clean local builds produced those hashes. Physical HIL after flashing that
+exact BIN onto a device carrying rev9's old eight-byte record at `0x0011`
+showed that SET 7 failed closed with status 1 and GET remained at default code
+8. The attempt to replace a differently sized record at the same ID therefore
+does not work with this EEPROM PDM implementation. Rev10 is not a valid
+persistence release.
+
+Historical rev11 clean pinned-BA2 wrapper-default build:
+
+```
+text=255696  data=2104  bss=30421
+_minimum_heap_end=0x0400679c
+_stack_low_water_mark=0x04006890
+linker RAM margin=244 bytes
+bin sha256 a704ba590c4a03e55be889d01c83b77c3491a09b708a8bca507b1829631b026e
+elf sha256 19d8192a4e98c35a0189cf8381b3c849d0bbd7a290202658b082090ce19b1bb6
+```
+
+Two clean local builds produced those hashes. This exact BIN has not yet been
+flashed or persistence-qualified.
+
+Rev13 clean pinned-BA2 wrapper-default build:
+
+```
+text=256036  data=2104  bss=30421
+_minimum_heap_end=0x0400679c
+_stack_low_water_mark=0x04006890
+linker RAM margin=244 bytes
+bin size=258148 bytes
+bin sha256 a510aaba81c320a26a7de76428e7231fc91466bddd990087c104c157a41ce96b
+elf sha256 ff3d310e64fa354f54fccf80a60007bbd13f6bb02dd27f6db07c4175abbc7dd5
+DIAG_FW_BUILD_ID=0x0105C521
+```
+
+Two clean builds produced the same BIN and ELF hashes. HIL of this exact image
+proved TX power 7 survives both a full power cycle and a soft adapter restart.
+The same HIL exposed an unresolved software-reset storm during an IKEA RODRET
+Active Endpoints interview; watchdog and brownout flags remained clear.
+
+Current rev14 clean pinned-BA2 wrapper-default build:
+
+```
+text=256308  data=2104  bss=30437
+_minimum_heap_end=0x040067ac
+_stack_low_water_mark=0x04006890
+linker RAM margin=228 bytes
+bin size=258420 bytes
+bin sha256 5aeeaf1b91139bbae29f8f452db8f70fe921315cc378176610ec2027ecca6ab4
+elf sha256 3d98888f0f1e72e303ac5298efd002d24c2d2d26705cb2f78a5dfaeafffed79e
+DIAG_FW_BUILD_ID=0x0105C522
+```
+
+Rev14 keeps the six-byte reset diagnostic layout and uses byte 5 to
+distinguish synchronous exceptions and requested software resets. Its
+checksum-guarded marker occupies a 12-byte linker `NOLOAD` SRAM section and
+never writes PDM. HIL consistently returned reason `1` during the RODRET
+interview storm, proving entry through the bus-error handler but not yet
+localising the faulting instruction.
+
+Historical rev15 clean pinned-BA2 wrapper-default build:
+
+```
+text=256776  data=2104  bss=30469
+_minimum_heap_end=0x040067cc
+_stack_low_water_mark=0x04006890
+linker RAM margin=196 bytes
+bin size=258888 bytes
+bin sha256 f052390fa76e520fbcc51866d3e11c9cee60f33d9f80c31dd7358c751ccbf073
+elf sha256 73d960a5820701638d7873ad0f2701365d816b41cb88a3b09ff1999b1d81d23e
+DIAG_FW_BUILD_ID=0x0105C523
+```
+
+Rev15 expands the guarded `NOLOAD` marker to 28 bytes, captures bus-error
+EPCR/EEAR/SP/LR before the handler's first call, and exposes them through the
+new exact 22-byte `0x8D2C` response. Existing `0x8D2B` remains exactly six
+bytes. This is build evidence only; rev15 has not been flashed or
+HIL-qualified.
+
+Current rev16 clean pinned-BA2 wrapper-default build:
+
+```
+text=256780  data=2104  bss=30469
+_minimum_heap_end=0x040067cc
+_stack_low_water_mark=0x04006890
+linker RAM margin=196 bytes
+bin size=258892 bytes
+bin sha256 4910a67aaeeb10fef7a5ad4e79065eeb2a1f3bc54677b342b94731ac525424fd
+elf sha256 3074798390dcd609502380b07970716c3d0f2ec3efa6f1fe671e734a11ce559d
+DIAG_FW_BUILD_ID=0x010DC53C
+```
+
+Rev16 leaves the `0x8D2B` six-byte and `0x8D2C` 22-byte payloads unchanged.
+It preserves bit 18 as the shipped reset-summary capability and adds bit 19
+solely for reset context, allowing hosts to distinguish rev12-14 from
+context-capable firmware truthfully. The measurements above were recorded
+before rev16 HIL.
+
+Rev16 was subsequently flashed and used to localize the RODRET reset storm to
+a bus error at `bDuplicateCheck()+0x2c8` in the prebuilt v2395 ZPS APS library.
+
+Current rev17 clean pinned-BA2 wrapper-default build:
+
+```
+text=256808  data=2104  bss=30469
+_minimum_heap_end=0x040067cc
+_stack_low_water_mark=0x04006890
+linker RAM margin=196 bytes
+bin size=258920 bytes
+bin sha256 025e033cb73f8e68c57d41263c7b557888c49afa774c695aacce18dd053eecb4
+elf sha256 4c9fedc3c01412a68817b03587f38868b33aef7938df1df924f976f237936309
+DIAG_FW_BUILD_ID=0x010DC53D
+```
+
+Rev17 defines the key-table index only when `zps_psFindKeyDescr()` returns no
+descriptor. Some v2395 early failure paths leave the output untouched, and
+`bDuplicateCheck()` can then consume the stale CRC stack slot as an incoming-
+frame-counter array index. Successful lookup and APS replay decisions are
+unchanged; the keyless duplicate-table snapshot uses the valid slot-zero
+counter instead of an undefined address.
+The shipped NOLTO call targets the wrapper, and two clean builds produced the
+same hashes. The exact BIN was flashed on ZiGate v1 JN5169 and preserved PAN
+`0x6ADA`, channel 15 and TX power `7`. Two awake IKEA RODRET interviews
+received `0x8002`, `0x8005` and `0x8004`, completed with one endpoint, and
+produced no new `0x8006` restart indication. The retained reset context stayed
+at the expected host-reset reason `0x10`.
 
 ## OCB firmware hardening and typed export status
 
@@ -194,10 +336,9 @@ read-only over Zigbee (see "Time cluster ownership" below): one 58-byte
 `.text` function (`bZigate_VetoRemoteTimeWrite`) plus its call site, **+60 B of
 flash and zero `.data`/`.bss`**, so the link-time RAM margin is unchanged at
 316 B. Neither the host wire ABI, `DIAG_PROTO_MINOR`, `DIAG_BUILD_REVISION`
-nor `DIAG_FW_BUILD_ID` (`0x01014525`) changed, so the fix was folded into rev9
-in place rather than widened to a rev10 — exactly as rev8 was corrected in
-place. This is only legitimate because rev9 was never flashed or published:
-its previous artifact `bin 457c49fc… / elf 417f09f2…` at `text=253544` exists
+nor `DIAG_FW_BUILD_ID` (`0x01014525`) changed, so the fix was folded into that
+historical non-OCB rev9 build rather than widening it at that stage. Its
+superseded artifact `bin 457c49fc… / elf 417f09f2…` at `text=253544` existed
 only in the working tree and appears nowhere in committed history.
 The rev8 image was `bin 2bc2b354… / elf 17ba7210…` at `text=253528`; rev8 adds
 a 32-bit per-request transaction id to that one command
@@ -437,7 +578,7 @@ spending the remaining RAM on unsupported instances, and that pruning stands:
   Statistics, Electrical Measurement, Illuminance Level, Occupancy and
   Pressure) were removed.
 
-### Endpoint-1 raw-NCP transmit allowlist (rev9, corrected after HIL)
+### Endpoint-1 output descriptor (rev9, corrected after HIL)
 
 rev6 also pruned the **output** list on the same "no local client instance =
 false advertisement" reasoning. Physical HIL after the host-side `0x0530`
@@ -450,12 +591,12 @@ fixes shows that reasoning does not hold for an NCP:
   (`ZPS_APL_APS_E_ILLEGAL_REQUEST`) before anything is transmitted, because
   endpoint 1 no longer lists `0x0001` as an output cluster.
 
-The ZPS APS layer therefore treats an endpoint's OutputClusters list as the
-**allowlist for raw, host-originated transmissions**, independently of whether
-a firmware-resident ZCL client instance exists. In this NCP the host is the
-Zigbee controller, so those entries are a truthful statement of what the
-host+NCP pair can originate, not a claim about firmware ZCL objects. rev9
-restores the entries the hub legitimately originates:
+rev9 restored the entries the hub legitimately originates. Later rev17
+disassembly established that the original HIL split was correlation rather
+than proof of the proposed mechanism: `ZPS_eAplAfUnicastAckDataReq()` validates
+the source endpoint and takes its profile ID, but does not search the endpoint
+output-cluster list. The list remains the truthful advertised descriptor for
+the host+NCP pair, not a firmware-resident ZCL-instance list:
 
 | Cluster | Id | Why the hub originates it |
 | --- | --- | --- |
@@ -473,6 +614,14 @@ Colour Control, Door Lock, Metering, IAS Zone, Thermostat, Illuminance
 Measurement, Relative Humidity, Temperature, Diagnostics, Window Covering,
 IAS Warning Device.
 
+rev17 HIL reconfirmed that the exact publication-candidate BIN contains this
+25-entry list, including `0x0001`, yet a Power Configuration raw request still
+returned APS `0xA3`. The one-byte APS status is not the separate
+`ZPS_teExtendedStatus` callback and therefore does not identify a rejected
+field. The host now reports `0xA3` as a local rejection, logs stock-firmware
+`0x9999` extended status when emitted, and decodes the request-sent, APS
+sequence, NPDU-use and APDU-use bytes already appended to `0x8000`.
+
 **Appliance Statistics `0x0B03` was deliberately NOT restored**: the host has
 no decoder, converter, interview or command path for it — only a cluster-name
 string — so no legitimate origination exists to authorize.
@@ -480,8 +629,9 @@ string — so no legitimate origination exists to authorize.
 Two invariants this must not violate, both asserted by `scripts/check.sh`:
 
 1. **No ZCL runtime instances are added for raw APS.** An output-descriptor
-   entry authorizes the NCP to *originate* a cluster through `0x0530`; it does
-   not require, and must not be paired with, a local cluster instance. Local
+   entry advertises the host+NCP surface but is not consulted by the linked
+   raw-unicast implementation. It must not be paired with a local cluster
+   instance merely to send `0x0530`. Local
    instances remain necessary only where the *firmware itself* calls
    `eZCL_CustomCommandSend` (Window Covering client, IAS WD client) or answers
    network reads (Time server) — exactly the three overlay instances.
@@ -592,13 +742,32 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 3. Resolve Blocker A symbol deltas with validated mappings.
 4. Add protocol extensions and safety fixes as reviewable commits.
 
-## Diagnostic ABI — proto 1.2 / build rev 9
+## Diagnostic ABI — proto 1.2 / build rev 17
 
-- Protocol **1.2**, build **rev 9**; capability response `0x8D0F`;
-  wrapper-default deterministic build id `0x0101C525` and capability bitmap
-  `0x000000000000C60F`. The earlier rev9 build without typed OCB capability
+- Protocol **1.2**, build **rev 17**; capability response `0x8D0F`;
+  wrapper-default deterministic build id `0x010DC53D` and capability bitmap
+  `0x00000000000CC60F`. The earlier rev9 build without typed OCB capability
   bit 15 used build ID `0x01014525` (rev8 was `0x01014524`, rev7
-  `0x0101452B`). Enabling experimental bit 16 produces `0x0100C525`.
+  `0x0101452B`). Enabling experimental bit 16 produces `0x010CC53D`.
+- **Boot reset snapshot (rev12)** — capability bit 18 gates the additive empty
+  `0x0D2B` request and six-byte `0x8D2B` response. It snapshots
+  `u16AHI_PowerStatus()`, watchdog-reset, and brownout-reset at entry to
+  `vAppMain()`. Rev14 implements the existing reason byte with a guarded
+  `NOLOAD` SRAM marker for synchronous exceptions and requested software
+  resets; no PDM write occurs. Exact framing is in
+  `RESET_DIAGNOSTIC_ABI.md`.
+- **Exception context (rev15 instrumentation, rev16 negotiation fix)** —
+  independent capability bit 19 gates empty request
+  `0x0D2C` and exact 22-byte response `0x8D2C`. Bus errors retain EPCR, EEAR,
+  handler SP and interrupted LR/r9. The obsolete exception stack walk was
+  removed because it dereferenced memory after a bus error and could obscure
+  the original fault. Bit 18 continues to guarantee only the shipped
+  `0x0D2B` reset-summary contract.
+- **APS key-index guard (rev17)** — the linker wraps the v2395
+  `zps_psFindKeyDescr()` lookup and defines its output index only on a `NULL`
+  return. This prevents `bDuplicateCheck()` from indexing its incoming frame
+  counter array with a stale CRC value without changing key matching or replay
+  comparison.
 - **The rev8→rev9 revision change itself was descriptor-only.** No existing
   command encoding changed: the revision identified restoration of endpoint
   1's raw-`0x0530` output-cluster allowlist. The current unpublished candidate
@@ -678,18 +847,29 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
     changed, hence the proto-minor + build-rev bump (host validator must move
     to 1.2 / rev 4).
   - The coordinator now stores a successfully round-tripped `0x0806` value in
-    the dedicated application record `PDM_ID_APP_TX_POWER` (`0x0011`). The
-    five-byte record carries `TX` magic, format version 1, the native code, and
-    a CRC-8 check byte. `ZPS_eAplAfInit()` is not the restore anchor: a later
+    the dedicated application record `PDM_ID_APP_TX_POWER` (`0x0012`). The
+    rev11 five-byte packed record carries `TX` magic, format version 2, the
+    native code, and a CRC-8 check byte. The rev9 source called its structure
+    five bytes, but BA2 ABI tail alignment made `sizeof` eight; the three
+    padding bytes were not covered by the CRC. Rev10's compile-time size check
+    prevented that format drift, but HIL showed that PDM would not replace the
+    old eight-byte record with a five-byte record at the same ID. Rev11 moves
+    v2 to `0x0012`; `0x0011` is ignored and permanently reserved rather than
+    deleted or migrated. The next successful SET creates `0x0012`.
+    `ZPS_eAplAfInit()` is not the restore anchor: a later
     stack start can issue an MLME reset and restore PIB defaults. For a restored
     coordinator the order is `BDB_vStart()` →
     `BDB_vNfFormCentralizedNwk()` → `ZPS_eAplZdoStartStack()` →
     `ZPS_EVENT_NWK_STARTED`; for a factory-new coordinator the host formation
     command enters `BDB_eNfStartNwkFormation()` and reaches the same event.
     `bdb_taskBDB()` runs its init/formation state machines before forwarding
-    that ZPS event through `BDB_EVENT_ZPSAF` to `APP_vHandleStackEvents()`.
-    The application therefore applies the setting at every forwarded
-    `ZPS_EVENT_NWK_STARTED`, after the corresponding start/reset MLME work.
+    that ZPS event through `BDB_EVENT_ZPSAF`. Published rev9 applied from
+    `APP_vHandleStackEvents()` inside that callback chain; physical HIL on
+    db6f8f2 showed that SET 7 reverted to default code 8 after adapter restart,
+    so that ordering was not a valid persistence guarantee. Rev10 observes
+    every forwarded `NWK_STARTED` in `APP_vBdbCallback` before endpoint routing,
+    marks a RAM pending flag, lets `bdb_taskBDB()` drain its queue and return,
+    and only then applies the cached value from `APP_vMainLoop()`.
     This is intentional: any later in-process
     `BDB_eNfStartNwkFormation()` accepted after BDB's on-network state has
     cleared invokes `BDB_vNfFormCentralizedNwk()` and
@@ -705,7 +885,8 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
     radio operation but skips `PDM_eSaveRecordData()`. A readable old PIB is
     required before any SET mutation. A SET is reported successful only after
     exact radio round-trip and either a matching valid record or a successful
-    PDM save; every post-mutation failure rolls back to the readable old PIB.
+    PDM save followed by an exact, fully validated PDM readback; every
+    post-mutation failure rolls back to the readable old PIB.
     This changes neither `0x0806`/`0x0807` encoding nor accepted values. These
     are **native signed six-bit MiniMac codes**, not calibrated dBm
     measurements.
@@ -731,6 +912,21 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
 
 ## Validated safety fixes  [DONE]
 
+- **Raw endpoint-0 ZDP bypass (rev12)** — in `RAW_MODE_ON`, endpoint-0
+  responses/indications are forwarded from the original APDU and freed exactly
+  once before returning, without calling `zps_bAplZdpUnpackResponse`.
+  A structurally valid 12-byte Device_annce is the sole typed exception so the
+  deployed `0x004D` join indication remains unchanged. Non-raw behavior is
+  unchanged.
+- **Immutable SerialLink TX (rev12)** — `vSL_WriteMessage()` no longer stores
+  LQI at `pu8Data[u16Length]`. It computes checksum over a virtual trailing LQI
+  and streams that byte through the existing escape function after the caller
+  payload. XOR and CCITT golden checks preserve the historical wire bytes;
+  exact-size and scalar callers no longer require writable tail storage.
+- **Strict raw APS request bounds (rev12)** — `0x0530` validates address mode,
+  the complete 12-byte short/18-byte IEEE header, and exact declared payload
+  length before reading variable fields or calling the APDU allocation/copy
+  helper. Malformed input returns `INCORRECT_PARAMETERS` with request-sent zero.
 - **No hidden Xiaomi mutation** — removed the join-time global Node Descriptor
   `u16ManufacturerCode` rewrite in `app_general_events_handler.c`
   (`NWK_NEW_NODE_HAS_JOINED`); `DEVICE_ANNOUNCE` emission preserved.

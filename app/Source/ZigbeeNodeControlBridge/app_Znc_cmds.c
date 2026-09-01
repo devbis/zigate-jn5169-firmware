@@ -119,6 +119,8 @@ typedef char diag_version_sync_assert[(DIAG_FW_VERSION == VERSION) ? 1 : -1];
  * status space (BDB_E_ERROR_COMMISSIONING_IN_PROGRESS == 6), so it cannot be
  * confused with any BDB enum value. */
 #define APP_R8024_STATUS_FORMATION_FAILURE   (ZPS_NWK_ENUM_STARTUP_FAILURE)
+#define APP_RAW_APS_SHORT_HEADER_LEN          (12U)
+#define APP_RAW_APS_IEEE_HEADER_LEN           (18U)
 /****************************************************************************/
 /***    Type Definitions                          ***/
 /****************************************************************************/
@@ -295,6 +297,7 @@ extern tsLedState      s_sLedState;
 uint16             u16PacketType;
 uint16             u16PacketLength;
 bool_t             bResetIssued          =  FALSE;
+uint8              u8ResetReason         =  DIAG_RESET_REASON_NONE;
 uint32             u32ChannelMask        =  0;
 uint32             u32OldFrameCtr;
 uint64             u64CallbackMacAddress =  0;
@@ -545,6 +548,20 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             case (E_SL_MSG_GENERAL_DIAG_REQ):
             {
                 CUSTOMDIAG_vHandleGeneralDiag(u16PacketLength);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_RESET_DIAG_REQ):
+            {
+                CUSTOMDIAG_vHandleResetDiag(u16PacketLength);
+                return;
+            }
+            break;
+
+            case (E_SL_MSG_RESET_CONTEXT_REQ):
+            {
+                CUSTOMDIAG_vHandleResetContext(u16PacketLength);
                 return;
             }
             break;
@@ -895,6 +912,7 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             case (E_SL_MSG_RESET):
             {
                 bResetIssued    =  TRUE;
+                u8ResetReason   =  DIAG_RESET_REASON_HOST_RESET;
                 ZTIMER_eStart( u8IdTimer, ZTIMER_TIME_MSEC ( 20 ) );
 
             }
@@ -1052,6 +1070,7 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             {
                 PDM_vDeleteAllDataRecords();
                 bResetIssued    =  TRUE;
+                u8ResetReason   =  DIAG_RESET_REASON_ERASE_PDM;
                 ZTIMER_eStart( u8IdTimer, ZTIMER_TIME_MSEC ( 1 ) );
             }
             break;
@@ -1099,36 +1118,75 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
             {
             	ZPS_tsAfProfileDataReq    sAfProfileDataReq;
             	uint8                     u8DataLength;
-            	if ((au8LinkRxBuffer[0]== E_ZCL_AM_IEEE) || (au8LinkRxBuffer[0]== E_ZCL_AM_IEEE_NO_ACK))
+                uint8                     u8AddressMode;
+                uint16                    u16HeaderLength;
+
+                if (u16PacketLength < 1U)
+                {
+                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
+                    break;
+                }
+
+                u8AddressMode = au8LinkRxBuffer[0];
+                if (!((u8AddressMode <= E_ZCL_AM_BROADCAST) ||
+                      (u8AddressMode >= E_ZCL_AM_BOUND_NO_ACK &&
+                       u8AddressMode <= E_ZCL_AM_IEEE_NO_ACK)))
+                {
+                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
+                    break;
+                }
+
+                u16HeaderLength =
+                    ((u8AddressMode == E_ZCL_AM_IEEE) ||
+                     (u8AddressMode == E_ZCL_AM_IEEE_NO_ACK)) ?
+                        APP_RAW_APS_IEEE_HEADER_LEN :
+                        APP_RAW_APS_SHORT_HEADER_LEN;
+
+                if (u16PacketLength < u16HeaderLength)
+                {
+                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
+                    break;
+                }
+
+                u8DataLength = au8LinkRxBuffer[u16HeaderLength - 1U];
+                if ((uint16)u8DataLength !=
+                    (uint16)(u16PacketLength - u16HeaderLength))
+                {
+                    u8Status = E_SL_MSG_STATUS_INCORRECT_PARAMETERS;
+                    break;
+                }
+
+                if ((u8AddressMode == E_ZCL_AM_IEEE) ||
+                    (u8AddressMode == E_ZCL_AM_IEEE_NO_ACK))
 				{
 					sAfProfileDataReq.uDstAddr.u64Addr    =  ZNC_RTN_U64 ( au8LinkRxBuffer, 1 );
 					sAfProfileDataReq.u16ClusterId        =  ZNC_RTN_U16 ( au8LinkRxBuffer, 11 );
 					sAfProfileDataReq.u16ProfileId        =  ZNC_RTN_U16 ( au8LinkRxBuffer, 13 );
-					sAfProfileDataReq.eDstAddrMode        =  au8LinkRxBuffer[0];
+					sAfProfileDataReq.eDstAddrMode        =  u8AddressMode;
 					sAfProfileDataReq.u8SrcEp             =  au8LinkRxBuffer[9];
 					sAfProfileDataReq.u8DstEp             =  au8LinkRxBuffer[10];
 					sAfProfileDataReq.eSecurityMode       =  au8LinkRxBuffer[15];
 					sAfProfileDataReq.u8Radius            =  au8LinkRxBuffer[16];
-					u8DataLength                          =  au8LinkRxBuffer[17];
-					 u8Status      =  APP_eApsProfileDataRequest ( &sAfProfileDataReq,
-																					  &au8LinkRxBuffer[18],
-																					  u8DataLength,
-																					  &u8SeqNum );
+					u8Status = APP_eApsProfileDataRequest(
+                                        &sAfProfileDataReq,
+                                        &au8LinkRxBuffer[APP_RAW_APS_IEEE_HEADER_LEN],
+                                        u8DataLength,
+                                        &u8SeqNum);
 				}else{
 
 					sAfProfileDataReq.uDstAddr.u16Addr    =  ZNC_RTN_U16 ( au8LinkRxBuffer, 1 );
 					sAfProfileDataReq.u16ClusterId        =  ZNC_RTN_U16 ( au8LinkRxBuffer, 5 );
 					sAfProfileDataReq.u16ProfileId        =  ZNC_RTN_U16 ( au8LinkRxBuffer, 7 );
-					sAfProfileDataReq.eDstAddrMode        =  au8LinkRxBuffer[0];
+					sAfProfileDataReq.eDstAddrMode        =  u8AddressMode;
 					sAfProfileDataReq.u8SrcEp             =  au8LinkRxBuffer[3];
 					sAfProfileDataReq.u8DstEp             =  au8LinkRxBuffer[4];
 					sAfProfileDataReq.eSecurityMode       =  au8LinkRxBuffer[9];
 					sAfProfileDataReq.u8Radius            =  au8LinkRxBuffer[10];
-					u8DataLength                          =  au8LinkRxBuffer[11];
-					u8Status      =  APP_eApsProfileDataRequest( &sAfProfileDataReq,
-																					  &au8LinkRxBuffer[12],
-																					  u8DataLength,
-																					  &u8SeqNum );
+					u8Status = APP_eApsProfileDataRequest(
+                                        &sAfProfileDataReq,
+                                        &au8LinkRxBuffer[APP_RAW_APS_SHORT_HEADER_LEN],
+                                        u8DataLength,
+                                        &u8SeqNum);
 				}
 
 
@@ -2850,6 +2908,7 @@ PUBLIC void APP_vProcessIncomingSerialCommands ( uint8    u8RxByte )
                 sZllState.eState = PDM_UPDATE;
                 PDM_eSaveRecordData(PDM_ID_APP_ZLL_CMSSION, &sZllState, sizeof(sZllState));
                 bResetIssued    =  TRUE;
+                u8ResetReason   =  DIAG_RESET_REASON_RAW_PDM_RESET;
                 ZTIMER_eStart( u8IdTimer, ZTIMER_TIME_MSEC ( 1 ) );
             }
             break;
@@ -4349,6 +4408,7 @@ PUBLIC void APP_vFactoryResetRecords( void)
     ZPS_vSaveAllZpsRecords ( );
 
     bResetIssued =  TRUE;
+    u8ResetReason = DIAG_RESET_REASON_FACTORY_RESET;
     ZTIMER_eStart ( u8IdTimer, ZTIMER_TIME_MSEC ( 1 ) );
 
 }
@@ -4668,6 +4728,7 @@ PUBLIC void APP_vIdentifyEffectEnd ( void* pvParam )
     uint8 u8Status = 0;
     if( bResetIssued )
     {
+        CUSTOMDIAG_vRetainResetReason(u8ResetReason);
         vAHI_SwReset();
         bResetIssued =  FALSE;
     }

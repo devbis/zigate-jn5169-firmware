@@ -58,7 +58,8 @@ PUBLIC uint32 APP_vCMDHandleAHICommand(uint16 u16PacketType,
                                        uint16 u16PacketLength,
                                        uint8 *pu8LinkRxBuffer,
                                        uint8 *pu8Status);
-PUBLIC void APP_vAHIApplyPersistedTxPower(void);
+PUBLIC void APP_vAHINotifyNetworkStarted(void);
+PUBLIC void APP_vAHIServicePersistedTxPower(void);
 PUBLIC void vAPP_IpnStatsOutput(void);
 PUBLIC void vAPP_IpnStatsReset(void);
 

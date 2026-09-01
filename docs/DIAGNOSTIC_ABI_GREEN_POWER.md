@@ -4,7 +4,7 @@ Status: **implemented in firmware C** against v2395 (the ControlBridge port
 compiles and links — see `MIGRATION_STATUS.md`). This document is the normative
 wire contract that the Go host (`adapter/zigate/greenpower.go`) codes against,
 and that the firmware implements. The custom diagnostic protocol is at
-**proto 1.2 / build rev 9** (`custom_diag.h`); rev9 changed no command encoding.
+**proto 1.2 / build rev 17** (`custom_diag.h`); rev17 changed no Green Power command encoding.
 
 ## Rationale
 

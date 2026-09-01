@@ -53,6 +53,19 @@ histories. Superseded patch snapshots were intentionally removed because they
 contained the retired TCLK instrumentation and obsolete protocol semantics.
 Use `git log upstream/v2395..HEAD` to audit every local change.
 
+The uncommitted rev17 work is local engineering on that pinned source: it
+preserves the uncommitted rev11 TX-power/PDM changes, applies bounded parser
+and SerialLink fixes based on rev10 physical reset observations, and adds the
+read-only reset snapshot documented in `docs/RESET_DIAGNOSTIC_ABI.md`. Rev13
+closed the boot-time TX restore race exposed by rev12 HIL; rev14 adds
+RAM-only software-reset reason retention after rev13 HIL exposed an unrelated
+reset storm. Rev15 adds retained fault registers after rev14 HIL identified
+the reset path as a bus error; rev16 independently negotiates that context.
+Rev17 guards the undefined APS key-index output identified from the rev16
+fault address without modifying either prebuilt SDK archive. No Go host
+source, parent-repository file, SDK binary, credential path, or hardware flash
+operation is part of this source revision.
+
 ## Toolchain (external, not vendored)
 
 - BA2 GCC `4.7.4`, GNU binutils `2.22` (`ba-elf-*`).

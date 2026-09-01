@@ -136,6 +136,10 @@ typedef enum
     E_SL_MSG_GP_COMMISSION_RSP                                 =   0x8D17,
     E_SL_MSG_GENERAL_DIAG_REQ                                  =   0x0D1F,
     E_SL_MSG_GENERAL_DIAG_RSP                                  =   0x8D1F,
+    E_SL_MSG_RESET_DIAG_REQ                                    =   0x0D2B,
+    E_SL_MSG_RESET_DIAG_RSP                                    =   0x8D2B,
+    E_SL_MSG_RESET_CONTEXT_REQ                                 =   0x0D2C,
+    E_SL_MSG_RESET_CONTEXT_RSP                                 =   0x8D2C,
 
     E_SL_MSG_NETWORK_STATE_REQ                                 =   0x0009,
     E_SL_MSG_NETWORK_STATE_RSP                                 =   0x8009,
@@ -458,8 +462,8 @@ typedef struct
 /****************************************************************************/
 
 PUBLIC bool bSL_ReadMessage(uint16 *pu16Type, uint16 *pu16Length, uint16 u16MaxLength, uint8 *pu8Message,uint8 u8Byte);
-PUBLIC void vSL_WriteMessage(uint16 u16Type, uint16 u16Length, uint8 *pu8Data, uint8 u8LinkQuality);
-PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length, uint8 *pu8Data);
+PUBLIC void vSL_WriteMessage(uint16 u16Type, uint16 u16Length, const uint8 *pu8Data, uint8 u8LinkQuality);
+PUBLIC uint8 u8SL_CalculateCRC(uint16 u16Type, uint16 u16Length, const uint8 *pu8Data);
 /****************************************************************************/
 /***        Local Functions                                               ***/
 /****************************************************************************/

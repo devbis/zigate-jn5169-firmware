@@ -71,7 +71,11 @@
 #include "uart.h"
 #include "mac_pib.h"
 #include "PDM_IDs.h"
+#include "custom_diag.h"
 #include "app_common.h"
+#ifdef APP_AHI_CONTROL
+#include "app_ahi_commands.h"
+#endif
 #include "Log.h"
 #include "app_events.h"
 #include "zcl_common.h"
@@ -309,6 +313,9 @@ PUBLIC void vAppMain(void)
 {
     uint8    u8FormJoin;
     uint8    au8LinkTxBuffer[50];
+
+    CUSTOMDIAG_vCaptureResetCause();
+
     // Wait until FALSE i.e. on XTAL  - otherwise uart data will be at wrong speed
     while ( bAHI_GetClkSource ( ) == TRUE );
 
@@ -401,6 +408,14 @@ PUBLIC void vAppMain(void)
                            ( uint8* ) &sZllState.eNodeState,
                            0 ) ;
         BDB_vStart();
+#ifdef APP_AHI_CONTROL
+        /*
+         * Schedule an initial restore before serial RX can answer a host GET.
+         * A later NWK_STARTED schedules it again after any asynchronous
+         * MiniMac reset performed by the restored-network startup.
+         */
+        APP_vAHINotifyNetworkStarted();
+#endif
     }
     else
     {
@@ -639,6 +654,14 @@ PUBLIC void APP_vMainLoop(void)
     	if(sZllState.eState != PDM_UPDATE) {
         zps_taskZPS ( );
         bdb_taskBDB ( );
+#ifdef APP_AHI_CONTROL
+        /*
+         * Apply only after BDB has drained this pass's ZPS events. This keeps
+         * the PIB write outside the stack/BDB callback chain and after the
+         * NWK_STARTED-associated MLME start/reset.
+         */
+        APP_vAHIServicePersistedTxPower();
+#endif
 
         APP_vHandleAppEvents ( );
     	}
@@ -773,6 +796,8 @@ void vUnclaimedException ( void )
     asm volatile ("l.mfspr %0,r0,0x4800" :"=r"(u32PICMR) : );
     asm volatile ("l.mfspr %0,r0,0x4802" :"=r"(u32PICSR) : );
 
+    CUSTOMDIAG_vRetainResetReason(DIAG_RESET_REASON_UNCLAIMED_EXCEPTION);
+
     vLog_Printf ( TRACE_APPSTART,LOG_EMERG, "Unclaimed interrupt : %x : %x\n", u32PICSR, u32PICSR );
     vSL_LogFlush ( );
     /* Log the exception */
@@ -785,73 +810,51 @@ void vUnclaimedException ( void )
 
 void vStackOverflowHandler ( void )
 {
-
+    CUSTOMDIAG_vRetainResetReason(DIAG_RESET_REASON_STACK_OVERFLOW);
     vReportException ( "EXS" );
 }
 
 
 void vAlignmentErrorHandler ( void )
 {
+    CUSTOMDIAG_vRetainResetReason(DIAG_RESET_REASON_ALIGNMENT);
     vReportException ( "EXA" );
 }
 
 void vBusErrorHandler ( void )
 {
+    register uint32 u32Epcr;
+    register uint32 u32Eear;
+    register uint32 u32Sp;
+    register uint32 u32Lr;
+
+    asm volatile ("l.mfspr %0,r0,0x0020" :"=r"(u32Epcr) : );
+    asm volatile ("l.mfspr %0,r0,0x0030" :"=r"(u32Eear) : );
+    asm volatile ("l.or %0,r0,r1" :"=r"(u32Sp) : );
+    asm volatile ("l.or %0,r0,r9" :"=r"(u32Lr) : );
+    CUSTOMDIAG_vRetainExceptionContext(
+            DIAG_RESET_REASON_BUS_ERROR,
+            u32Epcr,
+            u32Eear,
+            u32Sp,
+            u32Lr);
     vReportException ( "EXB" );
 }
 
 void vIllegalInstructionHandler ( void )
 {
+    CUSTOMDIAG_vRetainResetReason(DIAG_RESET_REASON_ILLEGAL_INSTRUCTION);
     vReportException ( "EXI" );
 }
 
 void vReportException ( char*    sExStr )
 {
 
-    register uint32     u32EPCR;
-    register uint32     u32EEAR;
-    volatile uint32*    pu32Stack;
-
-    /* TODO - add reg dump too */
-
-    asm volatile ("l.mfspr %0,r0,0x0020" :"=r"(u32EPCR) : );
-    asm volatile ("l.mfspr %0,r0,0x0030" :"=r"(u32EEAR) : );
-    asm volatile ("l.or %0,r0,r1" :"=r"(pu32Stack) : );
-
-
     vSL_LogFlush();
-    /* Log the exception */
-    vLog_Printf(TRACE_EXC, LOG_CRIT, "\n\n\n%s EXCEPTION @ %08x (EA: %08x SK: %08x HP: %08x)",
-                               sExStr, u32EPCR, u32EEAR, pu32Stack, ( ( uint32* ) &_heap_location) [ 0 ] );
-    vSL_LogFlush ( );
-
-    vLog_Printf ( TRACE_EXC,LOG_CRIT, "Stack dump:\n" );
+    vLog_Printf(TRACE_EXC, LOG_CRIT, "\n\n\n%s EXCEPTION", sExStr);
     vSL_LogFlush ( );
 #if (DEBUG_WDR == TRUE)
     vAHI_WatchdogStop ( );
-#endif
-    /* loop until we hit a 32k boundary. should be top of stack */
-    while ( ( uint32 ) pu32Stack & 0x7fff )
-    {
-#if (DEBUG_WDR == TRUE)
-        volatile uint32 u32Delay;
-#endif
-        vLog_Printf ( TRACE_EXC,LOG_CRIT, "% 8x : %08x\n", pu32Stack, *pu32Stack );
-        vSL_LogFlush ( );
-        pu32Stack++;
-#if (DEBUG_WDR == TRUE)
-        for (u32Delay = 0; u32Delay < 100000; u32Delay++);
-            vAHI_DioSetOutput(LED_DIO_PINS, 0);
-        for (u32Delay = 0; u32Delay < 100000; u32Delay++);
-            vAHI_DioSetOutput(0, LED_DIO_PINS);
-#endif
-    }
-    vSL_LogFlush ( );
-#if (DEBUG_WDR == FALSE)
-    /* Software reset */
-    vAHI_SwReset ( );
-#endif
-#if (DEBUG_WDR == TRUE)
     while(1)
     {
         volatile uint32    u32Delay;
@@ -860,6 +863,8 @@ void vReportException ( char*    sExStr )
         for (u32Delay = 0; u32Delay < 100000; u32Delay++);
             vAHI_DioSetOutput(0, LED_DIO_PINS);
     }
+#else
+    vAHI_SwReset ( );
 #endif
 }
 

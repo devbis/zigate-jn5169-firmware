@@ -61,13 +61,55 @@ extern tsZllState  sZllState;   /* Application device/node state              */
 /****************************************************************************/
 /***        Local shared response buffer                                  ***/
 /***                                                                       ***/
-/*** Single static buffer reused by every handler. The extra LQI byte      ***/
-/*** appended by vSL_WriteMessage() is covered by DIAG_TX_LQI_RESERVE.     ***/
+/*** Single static buffer reused by every handler. SerialLink streams LQI   ***/
+/*** separately and never writes beyond the serialised payload.            ***/
 /*** Safe because serial commands are dispatched sequentially from a single***/
 /*** application-task context with no handler re-entrancy.                 ***/
 /****************************************************************************/
 
 PRIVATE uint8 s_au8DiagTx[DIAG_TX_BUFFER_SIZE];
+PRIVATE uint16 s_u16BootPowerStatus;
+PRIVATE uint8 s_u8BootResetFlags;
+PRIVATE uint8 s_u8BootResetReason;
+PRIVATE uint32 s_u32BootResetEpcr;
+PRIVATE uint32 s_u32BootResetEear;
+PRIVATE uint32 s_u32BootResetSp;
+PRIVATE uint32 s_u32BootResetLr;
+
+#define DIAG_RESET_RETAIN_MAGIC         (0x52535431UL)
+
+typedef struct
+{
+    uint32 u32Magic;
+    uint32 u32MagicInverse;
+    uint8 u8Reason;
+    uint8 u8ReasonInverse;
+    uint16 u16Check;
+    uint32 u32Epcr;
+    uint32 u32Eear;
+    uint32 u32Sp;
+    uint32 u32Lr;
+} tsDiagRetainedReset;
+
+PRIVATE volatile tsDiagRetainedReset s_sRetainedReset
+    __attribute__((section(".noinit")));
+
+PRIVATE uint16 u16DiagResetContextCheck(
+        uint8 u8Reason,
+        uint32 u32Epcr,
+        uint32 u32Eear,
+        uint32 u32Sp,
+        uint32 u32Lr)
+{
+    return (uint16)(0xA55AU ^
+                    (uint16)DIAG_RESET_RETAIN_MAGIC ^
+                    (uint16)(DIAG_RESET_RETAIN_MAGIC >> 16) ^
+                    u8Reason ^
+                    (uint16)u32Epcr ^ (uint16)(u32Epcr >> 16) ^
+                    (uint16)u32Eear ^ (uint16)(u32Eear >> 16) ^
+                    (uint16)u32Sp ^ (uint16)(u32Sp >> 16) ^
+                    (uint16)u32Lr ^ (uint16)(u32Lr >> 16));
+}
 
 #ifdef OCB_TYPED_SUPPORT
 /* One small bounded export snapshot prevents CORE from observing a mixture of
@@ -104,10 +146,7 @@ PRIVATE tsOcbExportSnapshot s_sOcbExport;
  * field order used by every other command in app_Znc_cmds.c. */
 PRIVATE void vDiagSendStatus(uint16 u16PacketType, uint8 u8Status)
 {
-    /* 8 serialised payload bytes + 1 reserved byte for the link-quality byte
-     * vSL_WriteMessage() writes at pu8Data[u16Length] before transmitting.
-     * Sizing this 8 overflowed the stack frame by exactly that one byte. */
-    uint8 au8Status[9];
+    uint8 au8Status[8];
     uint8 u8Length = 0;
 
     ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], u8Status,             u8Length );
@@ -119,6 +158,134 @@ PRIVATE void vDiagSendStatus(uint16 u16PacketType, uint8 u8Status)
     ZNC_BUF_U8_UPD  ( &au8Status[ u8Length ], u8GetApduUse(),       u8Length );
 
     vSL_WriteMessage(E_SL_MSG_STATUS, u8Length, au8Status, 0);
+}
+
+/****************************************************************************/
+/***        Boot reset-cause snapshot (0x0D2B / 0x8D2B)                  ***/
+/****************************************************************************/
+
+PUBLIC void CUSTOMDIAG_vCaptureResetCause(void)
+{
+    uint16 u16ExpectedCheck;
+
+    s_u16BootPowerStatus = u16AHI_PowerStatus();
+    s_u8BootResetFlags = 0U;
+    s_u8BootResetReason = DIAG_RESET_EXCEPTION_UNAVAILABLE;
+    s_u32BootResetEpcr = DIAG_RESET_CONTEXT_UNAVAILABLE;
+    s_u32BootResetEear = DIAG_RESET_CONTEXT_UNAVAILABLE;
+    s_u32BootResetSp = DIAG_RESET_CONTEXT_UNAVAILABLE;
+    s_u32BootResetLr = DIAG_RESET_CONTEXT_UNAVAILABLE;
+
+    if (bAHI_WatchdogResetEvent())
+    {
+        s_u8BootResetFlags |= DIAG_RESET_FLAG_WATCHDOG;
+    }
+    if (bAHI_BrownOutEventResetStatus())
+    {
+        s_u8BootResetFlags |= DIAG_RESET_FLAG_BROWNOUT;
+    }
+
+    u16ExpectedCheck = u16DiagResetContextCheck(
+            s_sRetainedReset.u8Reason,
+            s_sRetainedReset.u32Epcr,
+            s_sRetainedReset.u32Eear,
+            s_sRetainedReset.u32Sp,
+            s_sRetainedReset.u32Lr);
+    if (s_sRetainedReset.u32Magic == DIAG_RESET_RETAIN_MAGIC &&
+        s_sRetainedReset.u32MagicInverse == ~DIAG_RESET_RETAIN_MAGIC &&
+        s_sRetainedReset.u8ReasonInverse ==
+            (uint8)~s_sRetainedReset.u8Reason &&
+        s_sRetainedReset.u16Check == u16ExpectedCheck)
+    {
+        s_u8BootResetReason = s_sRetainedReset.u8Reason;
+        s_u32BootResetEpcr = s_sRetainedReset.u32Epcr;
+        s_u32BootResetEear = s_sRetainedReset.u32Eear;
+        s_u32BootResetSp = s_sRetainedReset.u32Sp;
+        s_u32BootResetLr = s_sRetainedReset.u32Lr;
+    }
+
+    s_sRetainedReset.u32Magic = 0U;
+    s_sRetainedReset.u32MagicInverse = 0U;
+    s_sRetainedReset.u8Reason = DIAG_RESET_REASON_NONE;
+    s_sRetainedReset.u8ReasonInverse = 0U;
+    s_sRetainedReset.u16Check = 0U;
+    s_sRetainedReset.u32Epcr = 0U;
+    s_sRetainedReset.u32Eear = 0U;
+    s_sRetainedReset.u32Sp = 0U;
+    s_sRetainedReset.u32Lr = 0U;
+}
+
+PUBLIC void CUSTOMDIAG_vRetainResetReason(uint8 u8Reason)
+{
+    CUSTOMDIAG_vRetainExceptionContext(
+            u8Reason,
+            DIAG_RESET_CONTEXT_UNAVAILABLE,
+            DIAG_RESET_CONTEXT_UNAVAILABLE,
+            DIAG_RESET_CONTEXT_UNAVAILABLE,
+            DIAG_RESET_CONTEXT_UNAVAILABLE);
+}
+
+PUBLIC void CUSTOMDIAG_vRetainExceptionContext(
+        uint8 u8Reason,
+        uint32 u32Epcr,
+        uint32 u32Eear,
+        uint32 u32Sp,
+        uint32 u32Lr)
+{
+    s_sRetainedReset.u8Reason = u8Reason;
+    s_sRetainedReset.u8ReasonInverse = (uint8)~u8Reason;
+    s_sRetainedReset.u32Epcr = u32Epcr;
+    s_sRetainedReset.u32Eear = u32Eear;
+    s_sRetainedReset.u32Sp = u32Sp;
+    s_sRetainedReset.u32Lr = u32Lr;
+    s_sRetainedReset.u16Check = u16DiagResetContextCheck(
+            u8Reason, u32Epcr, u32Eear, u32Sp, u32Lr);
+    s_sRetainedReset.u32MagicInverse = ~DIAG_RESET_RETAIN_MAGIC;
+    s_sRetainedReset.u32Magic = DIAG_RESET_RETAIN_MAGIC;
+}
+
+PUBLIC void CUSTOMDIAG_vHandleResetDiag(uint16 u16Len)
+{
+    uint8 u8Length = 0;
+
+    if (u16Len != 0U)
+    {
+        vDiagSendStatus(E_SL_MSG_RESET_DIAG_REQ,
+                        E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+
+    vDiagSendStatus(E_SL_MSG_RESET_DIAG_REQ, E_SL_MSG_STATUS_SUCCESS);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], DIAG_RSP_VERSION, u8Length);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], E_SL_MSG_STATUS_SUCCESS, u8Length);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_u8BootResetFlags, u8Length);
+    ZNC_BUF_U16_UPD (&s_au8DiagTx[u8Length], s_u16BootPowerStatus, u8Length);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_u8BootResetReason, u8Length);
+    vSL_WriteMessage(E_SL_MSG_RESET_DIAG_RSP, u8Length, s_au8DiagTx, 0);
+}
+
+PUBLIC void CUSTOMDIAG_vHandleResetContext(uint16 u16Len)
+{
+    uint8 u8Length = 0;
+
+    if (u16Len != 0U)
+    {
+        vDiagSendStatus(E_SL_MSG_RESET_CONTEXT_REQ,
+                        E_SL_MSG_STATUS_INCORRECT_PARAMETERS);
+        return;
+    }
+
+    vDiagSendStatus(E_SL_MSG_RESET_CONTEXT_REQ, E_SL_MSG_STATUS_SUCCESS);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], DIAG_RSP_VERSION, u8Length);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], E_SL_MSG_STATUS_SUCCESS, u8Length);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_u8BootResetReason, u8Length);
+    ZNC_BUF_U8_UPD  (&s_au8DiagTx[u8Length], s_u8BootResetFlags, u8Length);
+    ZNC_BUF_U16_UPD (&s_au8DiagTx[u8Length], s_u16BootPowerStatus, u8Length);
+    ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_u32BootResetEpcr, u8Length);
+    ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_u32BootResetEear, u8Length);
+    ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_u32BootResetSp, u8Length);
+    ZNC_BUF_U32_UPD (&s_au8DiagTx[u8Length], s_u32BootResetLr, u8Length);
+    vSL_WriteMessage(E_SL_MSG_RESET_CONTEXT_RSP, u8Length, s_au8DiagTx, 0);
 }
 
 /* rev4: canonical SIX-BIT TX-power code = GET & 0x3F.

@@ -54,6 +54,15 @@ SECTIONS
             _ram_data_end = ABSOLUTE(.);
         } > ram
 
+        /* Software reset does not erase SRAM. Keep the crash marker outside
+           the C runtime's .data copy and .bss clear ranges. */
+        .noinit ALIGN (0x04) (NOLOAD) :
+        {
+            *(.noinit)
+            *(.noinit.*)
+            . = ALIGN (4);
+        } > ram
+
         .bss ALIGN (0x04) :
         {
             _bss_start = ABSOLUTE(.);
@@ -105,4 +114,3 @@ PROVIDE(_heap_location  = u32HeapStart);
 PROVIDE(heap_location  = u32HeapStart);
 ASSERT(  LENGTH(ram) > ((_minimum_heap_end - ABSOLUTE(ORIGIN(ram))) + __stack_size), "Possible overflow of RAM")
 ENTRY(AppColdStart);
-

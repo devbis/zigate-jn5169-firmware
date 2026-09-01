@@ -34,7 +34,6 @@
 #endif
 
 #define OCBEXP_TX_MAX                     (96U)
-#define OCBEXP_TX_LQI_RESERVE             (1U)
 #define OCBEXP_EXPECTED_SEC_MATERIALS     (2U)
 #define OCBEXP_EXPECTED_APS_KEY_ENTRIES   (1U)
 #define OCBEXP_EXPECTED_MAC_TABLE         (36U)
@@ -62,7 +61,7 @@ extern PUBLIC bool_t zps_bGetFlashCredential(uint64 u64IeeeAddr,
                                               bool_t bTcCred,
                                               bool_t bUpdate);
 
-PRIVATE uint8 s_au8ExpTx[OCBEXP_TX_MAX + OCBEXP_TX_LQI_RESERVE];
+PRIVATE uint8 s_au8ExpTx[OCBEXP_TX_MAX];
 PRIVATE uint32 s_u32Challenge;
 PRIVATE uint32 s_u32UnlockTransaction;
 PRIVATE uint32 s_u32UnlockStarted;
@@ -79,7 +78,7 @@ PRIVATE void vExpWipe(void *pvData, uint16 u16Length)
 
 PRIVATE void vExpSendOuterStatus(uint16 u16Type, uint8 u8Status)
 {
-    uint8 au8Status[9];
+    uint8 au8Status[8];
     uint8 u8Length = 0;
     ZNC_BUF_U8_UPD  (&au8Status[u8Length], u8Status, u8Length);
     ZNC_BUF_U8_UPD  (&au8Status[u8Length], 0U, u8Length);

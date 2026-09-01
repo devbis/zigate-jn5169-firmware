@@ -81,8 +81,9 @@ NODE                   ?= COORDINATOR
 CRC_NEW                ?= CRC_XOR
 #CRC_NEW                ?= CCITT_CRC
 
-ifneq ($(OS),Windows_NT)
-	DISABLE_LTO ?= 1
+DISABLE_LTO ?= 1
+ifneq ($(DISABLE_LTO),1)
+$(error zps_psFindKeyDescr guard requires DISABLE_LTO=1)
 endif
 
 ifneq ($(GP_SUPPORT), 1)
@@ -237,6 +238,8 @@ LDFLAGS += -Wl,-u$(INTERRUPT_HANDLER_BBC) -Wl,-defsym,vAHI_IntHandlerBbc_select=
 
 endif
 
+override LDFLAGS += -Wl,--wrap=zps_psFindKeyDescr
+
 ###############################################################################
 # Application Source files
 # Note: Path to source file is found using vpath below, so only .c filename is required
@@ -261,6 +264,7 @@ APPSRC += uart.c
 APPSRC += pdum_apdu.S
 APPSRC += app_ota_server.c
 APPSRC += custom_diag.c
+APPSRC += zps_key_index_guard.c
 ifeq ($(OCB_KEY_EXPORT_RESTORE_EXPERIMENTAL),1)
 APPSRC += ocb_experimental.c
 endif
@@ -374,6 +378,7 @@ WindowCovering.o: CFLAGS += -DCLD_WINDOW_COVERING
 # sources in this tree are not clean under this flag and are out of scope.
 DIAG_STRICT_OBJS = \
     custom_diag.o \
+    zps_key_index_guard.o \
     ocb_experimental.o \
     app_general_events_handler.o \
     app_zcl_event_handler.o \

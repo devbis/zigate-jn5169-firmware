@@ -99,6 +99,8 @@
 #define TRACE_APP TRUE
 #endif
 
+#define APP_ZDP_DEVICE_ANNCE_PAYLOAD_LEN    (12U)
+
 /****************************************************************************/
 /***        Type Definitions                                              ***/
 /****************************************************************************/
@@ -579,7 +581,9 @@ PUBLIC void APP_vHandleStackEvents ( ZPS_tsAfEvent*    psStackEvent )
 
 
             uint8*    dataPtr =  ( uint8* ) PDUM_pvAPduInstanceGetPayload ( psStackEvent->uEvent.sApsDataIndEvent.hAPduInst );
-            uint8     u8Size  =  PDUM_u16APduInstanceGetPayloadSize ( psStackEvent->uEvent.sApsDataIndEvent.hAPduInst );
+            uint16    u16ApduSize = PDUM_u16APduInstanceGetPayloadSize(
+                                        psStackEvent->uEvent.sApsDataIndEvent.hAPduInst);
+            uint8     u8Size = (uint8)u16ApduSize;
 
             if( psStackEvent->uEvent.sApsDataIndEvent.u8SrcEndpoint != 0  &&
                 psStackEvent->uEvent.sApsDataIndEvent.u8DstEndpoint != 0 )
@@ -631,21 +635,29 @@ PUBLIC void APP_vHandleStackEvents ( ZPS_tsAfEvent*    psStackEvent )
             }
             else
             {
+                /*
+                 * In raw mode the host consumes the original ZDP APDU. Do not
+                 * pass variable-length endpoint-0 responses through the stock
+                 * typed unpacker first. A valid Device_annce remains on the
+                 * typed path to preserve the existing 0x004D indication.
+                 */
+                if (sZllState.u8RawMode == RAW_MODE_ON &&
+                    (psStackEvent->uEvent.sApsDataIndEvent.u16ClusterId !=
+                         ZPS_ZDP_DEVICE_ANNCE_REQ_CLUSTER_ID ||
+                     u16ApduSize != APP_ZDP_DEVICE_ANNCE_PAYLOAD_LEN))
+                {
+                    Znc_vSendDataIndicationToHost(psStackEvent, au8LinkTxBuffer);
+                    PDUM_eAPduFreeAPduInstance(
+                        psStackEvent->uEvent.sApsDataIndEvent.hAPduInst);
+                    return;
+                }
+
                 ZPS_tsAfZdpEvent    sApsZdpEvent;
 
                 zps_bAplZdpUnpackResponse ( psStackEvent,
                                             &sApsZdpEvent );
 
                 ZNC_BUF_U8_UPD ( &au8LinkTxBuffer [0] , sApsZdpEvent.u8SequNumber, u16Length );
-                if (sZllState.u8RawMode == RAW_MODE_ON){
-					if (sApsZdpEvent.u16ClusterId!=ZPS_ZDP_DEVICE_ANNCE_REQ_CLUSTER_ID)
-					{
-						Znc_vSendDataIndicationToHost(psStackEvent, au8LinkTxBuffer);
-						PDUM_eAPduFreeAPduInstance( psStackEvent->uEvent.sApsDataIndEvent.hAPduInst );
-						return;
-					}
-
-				}
                 switch(sApsZdpEvent.u16ClusterId)
                 {
                     case ZPS_ZDP_DEVICE_ANNCE_REQ_CLUSTER_ID:
@@ -1023,14 +1035,6 @@ PUBLIC void APP_vHandleStackEvents ( ZPS_tsAfEvent*    psStackEvent )
              bool_t    bSend =  TRUE;
              if(psStackEvent->eType == ZPS_EVENT_NWK_STARTED)
              {
-#ifdef APP_AHI_CONTROL
-                 /*
-                  * bdb_taskBDB() runs its init/formation state machines before
-                  * forwarding this ZPS event here. The MLME start/reset has
-                  * therefore completed for restored and newly formed networks.
-                  */
-                 APP_vAHIApplyPersistedTxPower();
-#endif
                  u8FormJoin = 1; /* formed */
              }
              if( psStackEvent->eType == ZPS_EVENT_NWK_FAILED_TO_START )
