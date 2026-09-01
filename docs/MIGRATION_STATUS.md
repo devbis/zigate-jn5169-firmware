@@ -957,15 +957,18 @@ the v2395 prebuilt `libZPSAPL`/`libZCL` binaries). Concretely:
     changed, hence the proto-minor + build-rev bump (host validator must move
     to 1.2 / rev 4).
   - The coordinator now stores a successfully round-tripped `0x0806` value in
-    the dedicated application record `PDM_ID_APP_TX_POWER` (`0x0012`). The
+    the dedicated application record `PDM_ID_APP_TX_POWER`. The
     rev11 five-byte packed record carries `TX` magic, format version 2, the
     native code, and a CRC-8 check byte. The rev9 source called its structure
     five bytes, but BA2 ABI tail alignment made `sizeof` eight; the three
     padding bytes were not covered by the CRC. Rev10's compile-time size check
     prevented that format drift, but HIL showed that PDM would not replace the
-    old eight-byte record with a five-byte record at the same ID. Rev11 moves
-    v2 to `0x0012`; `0x0011` is ignored and permanently reserved rather than
-    deleted or migrated. The next successful SET creates `0x0012`.
+    old eight-byte record with a five-byte record at the same ID, so rev11
+    moved v2 to `0x0012` and left `0x0011` permanently reserved rather than
+    deleted or migrated. rev9 was never flashed to any device, though, so no
+    PDM anywhere actually held that eight-byte record; the reservation was
+    later dropped and `PDM_ID_APP_TX_POWER` is `0x0011` again. The next
+    successful SET creates that record.
     `ZPS_eAplAfInit()` is not the restore anchor: a later
     stack start can issue an MLME reset and restore PIB defaults. For a restored
     coordinator the order is `BDB_vStart()` →

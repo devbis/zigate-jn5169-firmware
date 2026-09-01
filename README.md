@@ -158,9 +158,12 @@ The record is explicitly packed and fixed at five bytes (`TX`, format version
 2, code, CRC-8). Rev9's nominal five-byte C structure was actually eight bytes
 under the BA2 ABI because of tail padding. Rev10 attempted to replace that
 different-sized record at the same PDM ID, but physical HIL showed the EEPROM
-PDM rejected the SET. Rev11 therefore stores v2 at `0x0012`; legacy ID `0x0011`
-is ignored and permanently reserved. An upgraded device uses the default TX
-power until the host performs one successful SET to create the v2 record.
+PDM rejected the SET. Rev11 therefore stored v2 at `0x0012`, leaving legacy ID
+`0x0011` permanently reserved -- but rev9 was never flashed to any device, so
+no PDM anywhere actually held the old eight-byte record, and the reservation
+was later dropped: `PDM_ID_APP_TX_POWER` is `0x0011` again. An upgraded device
+uses the default TX power until the host performs one successful SET to
+create the v2 record.
 The accepted values remain exactly `0x00..0x0A` and `0x20..0x3F`. They are
 native signed six-bit MiniMac codes (`0x20..0x3F` represent −32..−1), **not
 calibrated dBm measurements**. Invalid, clamped, non-round-trippable, corrupt,
