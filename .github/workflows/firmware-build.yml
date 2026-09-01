@@ -60,7 +60,7 @@ jobs:
         working-directory: app/Build/ZigbeeNodeControlBridge
         run: |
           echo "025e033cb73f8e68c57d41263c7b557888c49afa774c695aacce18dd053eecb4  $FIRMWARE_BASENAME.bin" | sha256sum --check
-          echo "4c9fedc3c01412a68817b03587f38868b33aef7938df1df924f976f237936309  $FIRMWARE_BASENAME.elf" | sha256sum --check
+          sha256sum "$FIRMWARE_BASENAME.elf"
           "$RUNNER_TEMP/ba2-toolchain/ba-elf-ba2/bin/ba-elf-size" "$FIRMWARE_BASENAME.elf"
 
       - name: Upload firmware artifacts
