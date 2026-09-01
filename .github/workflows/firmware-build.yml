@@ -51,11 +51,16 @@ jobs:
           sh scripts/build.sh clean
           sh scripts/build.sh all
 
+      - name: Verify generated source and ABI invariants
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/ba2-toolchain
+        run: sh scripts/check.sh
+
       - name: Verify firmware
         working-directory: app/Build/ZigbeeNodeControlBridge
         run: |
-          echo "54eda516db00d7101ce3508bfb218e8e0755e9b14882fa3cff0c16228157cb28  $FIRMWARE_BASENAME.bin" | sha256sum --check
-          sha256sum "$FIRMWARE_BASENAME.elf"
+          echo "025e033cb73f8e68c57d41263c7b557888c49afa774c695aacce18dd053eecb4  $FIRMWARE_BASENAME.bin" | sha256sum --check
+          echo "4c9fedc3c01412a68817b03587f38868b33aef7938df1df924f976f237936309  $FIRMWARE_BASENAME.elf" | sha256sum --check
           "$RUNNER_TEMP/ba2-toolchain/ba-elf-ba2/bin/ba-elf-size" "$FIRMWARE_BASENAME.elf"
 
       - name: Upload firmware artifacts

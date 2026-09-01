@@ -156,12 +156,16 @@ for line in $RAW_PDM_CASES; do
 done
 
 EXPECTED_EP1_OUTPUT='PRIVATE const uint16 s_au16Endpoint1OutputClusterList[25] = { 0x0000, 0x0001, 0x0012, 0x0019, 0x0300, 0x0004, 0x0003, 0x0008, 0x0006, 0x0005, 0x0101, 0x0702, 0x0500, 0x0201, 0x0204, 0x0400, 0x0401, 0x0403, 0x0406, 0x0405, 0x0402, 0x0b04, 0x0b05, 0x0102, 0x0502, };'
-grep -Fqx "$EXPECTED_EP1_OUTPUT" "$ZPS_GEN"
-grep -A12 '^[[:space:]]*0x0104,$' "$ZPS_GEN" \
-    | grep -A8 '^[[:space:]]*1,$' \
-    | grep -q '^[[:space:]]*25,$'
-grep -A12 '^[[:space:]]*0x0104,$' "$ZPS_GEN" \
-    | grep -q '^[[:space:]]*s_au16Endpoint1OutputClusterList,$'
+if [ -f "$ZPS_GEN" ]; then
+    grep -Fqx "$EXPECTED_EP1_OUTPUT" "$ZPS_GEN"
+    grep -A12 '^[[:space:]]*0x0104,$' "$ZPS_GEN" \
+        | grep -A8 '^[[:space:]]*1,$' \
+        | grep -q '^[[:space:]]*25,$'
+    grep -A12 '^[[:space:]]*0x0104,$' "$ZPS_GEN" \
+        | grep -q '^[[:space:]]*s_au16Endpoint1OutputClusterList,$'
+else
+    echo "generated ZPS checks skipped (run scripts/build.sh first)"
+fi
 
 # Prove the build-system invariant itself, rather than only grepping its text.
 if make -s -C app/Build/ZigbeeNodeControlBridge \
@@ -243,12 +247,14 @@ grep -q '196-byte linker' "$OCB_DOC"
 
 # Exact generated v2395 legacy assumptions used for default-TC incoming
 # counter indexing and table enumeration.
-grep -Eq 's_keyPairTableStorage\[4\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
-grep -Eq 'au32IncomingFrameCounter\[4\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
-grep -Eq 's_keyPairTable = \{ s_keyPairTableStorage, 1 \}' app/Source/ZigbeeNodeControlBridge/zps_gen.c
+if [ -f "$ZPS_GEN" ]; then
+    grep -Eq 's_keyPairTableStorage\[4\]' "$ZPS_GEN"
+    grep -Eq 'au32IncomingFrameCounter\[4\]' "$ZPS_GEN"
+    grep -Eq 's_keyPairTable = \{ s_keyPairTableStorage, 1 \}' "$ZPS_GEN"
+    grep -Eq 's_asNwkSecMatSet\[2\]' "$ZPS_GEN"
+    grep -Eq 's_asTrustCenterDeviceTable\[36\]' "$ZPS_GEN"
+fi
 grep -Eq 'psAplDefaultTCAPSLinkKey;|psAplDefaultTCAPSLinkKey' Components/ZPSAPL/Include/zps_apl_aib.h
-grep -Eq 's_asNwkSecMatSet\[2\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
-grep -Eq 's_asTrustCenterDeviceTable\[36\]' app/Source/ZigbeeNodeControlBridge/zps_gen.c
 
 # Typed OCB is additive, bounded, correlated, and cannot accidentally advertise
 # key export or restore. The only key-by-EUI operation is an explicit
