@@ -63,10 +63,12 @@ AVAIL_TC_LINK_KEY, AVAIL_EUI = (1 << 2), (1 << 5)
 
 
 class RawSerial:
-    # 15s default: restoring the NWK outgoing frame counter (field 0x0003)
-    # loops PDM_eIncrementBitmap() once per 1024 counter units on-device (HIL-
-    # measured: ~800 iterations took a few seconds), so that one RESTORE_FIELD
-    # round trip can be much slower than the others.
+    # 15s default: generous headroom for a slow link; restoring the NWK
+    # outgoing frame counter (field 0x0003) used to loop PDM_eIncrementBitmap()
+    # once per 1024 counter units on-device, which could take many minutes for
+    # a large counter -- fixed firmware-side by writing the target bitmap value
+    # in one shot (ePDM_SetBitmapToValue()) instead of looping, so no single
+    # RESTORE_FIELD round trip is meaningfully slower than the others anymore.
     def __init__(self, port, baud=115200, timeout=15.0):
         self.fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
         speed = getattr(termios, "B%d" % baud)

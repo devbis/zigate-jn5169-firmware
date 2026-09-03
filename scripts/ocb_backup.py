@@ -92,13 +92,16 @@ AVAIL_TC_LINK_KEY, AVAIL_EUI = (1 << 2), (1 << 5)
 class SerialLink:
     """Minimal ZiGate SerialLink transport."""
 
-    # 15s default: restoring the NWK outgoing frame counter (field 0x0003)
-    # loops PDM_eIncrementBitmap() once per 1024 counter units on-device (HIL-
-    # measured: ~800 iterations took a few seconds), so that one RESTORE_FIELD
-    # round trip can be much slower than the others.
+    # 15s default: generous headroom for a slow link; restoring the NWK
+    # outgoing frame counter (field 0x0003) used to loop PDM_eIncrementBitmap()
+    # once per 1024 counter units on-device, which could take many minutes for
+    # a large counter -- fixed firmware-side by writing the target bitmap value
+    # in one shot (ePDM_SetBitmapToValue()) instead of looping, so no single
+    # RESTORE_FIELD round trip is meaningfully slower than the others anymore.
     def __init__(self, port, baud=115200, timeout=15.0):
         self.ser = serial.Serial(port, baud, timeout=0.05)
         self.timeout = timeout
+        self._buf = bytearray()
 
     def close(self):
         self.ser.close()
@@ -134,26 +137,41 @@ class SerialLink:
         self.ser.write(frame)
 
     def _read_frame(self, deadline):
-        """Read one raw (unescaped) frame body: type(2) len(2) crc(1) payload."""
-        buf = bytearray()
-        in_frame = False
-        esc = False
-        while time.time() < deadline:
+        """Read one raw (unescaped) frame body: type(2) len(2) crc(1) payload.
+
+        START(0x01)/ESC(0x02)/END(0x03) never occur as escaped data, so frame
+        boundaries can be located in the raw stream directly. self._buf is kept
+        across calls (not a local variable reset per call) so any bytes trailing
+        the frame just extracted -- e.g. a STATUS frame arriving in the same
+        read() chunk as its immediately-following typed response, which the
+        firmware always sends back to back -- aren't discarded. An earlier
+        version used a per-call local buffer and silently dropped the second
+        frame whenever both landed in one read(), which timed out on every
+        single OCB command (each one gets a STATUS + typed response pair)."""
+        while True:
+            start = self._buf.find(bytes([SL_START]))
+            if start == -1:
+                self._buf.clear()
+            else:
+                end = self._buf.find(bytes([SL_END]), start + 1)
+                if end != -1:
+                    escaped = self._buf[start + 1:end]
+                    del self._buf[:end + 1]
+                    out = bytearray()
+                    esc = False
+                    for b in escaped:
+                        if b == SL_ESC:
+                            esc = True
+                            continue
+                        out.append(b ^ 0x10 if esc else b)
+                        esc = False
+                    return bytes(out)
+                del self._buf[:start]
+            if time.time() >= deadline:
+                return None
             chunk = self.ser.read(64)
-            for b in chunk:
-                if b == SL_START:
-                    buf, in_frame, esc = bytearray(), True, False
-                    continue
-                if not in_frame:
-                    continue
-                if b == SL_END:
-                    return bytes(buf)
-                if b == SL_ESC:
-                    esc = True
-                    continue
-                buf.append(b ^ 0x10 if esc else b)
-                esc = False
-        return None
+            if chunk:
+                self._buf += chunk
 
     def recv(self, want_type, deadline=None):
         """Return payload bytes of the next frame matching want_type."""
